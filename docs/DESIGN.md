@@ -1,0 +1,35 @@
+# ECCLES WASM - design notes
+
+## Pipeline
+`bytes -> reader (chunked) -> section loader -> translator (per function) -> interpreter`
+
+* **Reader** pulls bytes through one `ECCLES_WASM_CHUNK_SIZE` buffer (or straight from a memory image for
+  `load_buffer`, zero-copy). Section payloads that are data (data segments) stream directly into guest memory.
+* **Section loader** enforces section order, sizes and index spaces. Imports are linked while loading
+  (host table -> hardware table -> WASI table), signatures compared structurally.
+* **Translator** converts each function body to a 16-bit word stream and discards the source bytes:
+  - LEB128 immediates decoded; memory-op alignment dropped; reinterpret ops removed (slots are raw bits);
+  - `block/loop/if/br/br_if/br_table` become relative jumps. Forward targets are back-patched through a chain
+    stored *in the unresolved slots themselves* (no side tables). Each branch records, when needed, "keep N
+    values, truncate to height H" (`*_FIX` ops) so the interpreter never tracks block heights;
+  - operand-stack height is tracked statically -> peak slots per function (`max_h`) is checked once per call
+    instead of per instruction; underflow, overflow, bad indices, bad labels are load errors;
+  - dead code after `br/return/unreachable` is parsed but not emitted (polymorphic stack handled by skipping).
+* **Interpreter**: one `switch` over wasm opcode values (0x00-0xC4 reused as-is) plus internal ops >= 0x100.
+  Values are untyped 64-bit slots; frames are `{pc, fp, func}`; locals live in the value stack, callee frames
+  overlap the caller's argument slots (no copying). Fuel and the optional yield hook sit on calls and backward
+  branches only.
+
+## Memory
+Arena grows from both ends: metadata/code from the bottom, stacks then guest memory from the top (so code
+translation can use "everything that's left" while a function is being emitted). `unload` just resets two
+pointers. Linear memory is allocated once at its declared size (optionally capped); `memory.grow` is refused.
+
+## Hardware layer
+`eccles_wasm_hal_t` is a table of 32 function pointers. Each backend fills what its SDK supports; stubs return
+`UNSUPPORTED`; `eccles_wasm_hal_override()` merges user pointers on top at run time. `enable()` = set output +
+write 1; `toggle()` = read + write. Guest imports are thin wrappers that translate guest-memory pointers (with
+bounds checks) and return the status as an i32 - a failing/unsupported pin never traps the guest.
+
+## Non-goals
+JIT/AOT, full type validation, multiple instances (the API is deliberately handle-free), threads.

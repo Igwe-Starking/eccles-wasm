@@ -1,0 +1,12 @@
+build/
+*.o
+*.obj
+*.elf
+*.map
+*.dSYM/
+__pycache__/
+*.pyc
+.vscode/
+.idea/
+.DS_Store
+compile_commands.json
