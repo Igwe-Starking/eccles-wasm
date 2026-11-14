@@ -18,7 +18,7 @@ jobs:
       matrix:
         cc: [gcc, clang]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: sudo apt-get update && sudo apt-get install -y clang
       - name: Tests, backend compile-checks, examples, SDK check
         run: make CC=${{ matrix.cc }} check
@@ -27,7 +27,7 @@ jobs:
     name: C/C++ guests to wasm32
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: sudo apt-get update && sudo apt-get install -y clang lld
       - run: make guests
 
@@ -35,14 +35,14 @@ jobs:
     name: ThreadSanitizer
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: make tsan
 
   fuzz:
     name: Differential fuzz + chaos
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
       - run: make fuzz
