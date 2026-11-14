@@ -6,6 +6,7 @@ random modules that are cross-checked against a reference engine (Node.js).
 import struct
 
 I32, I64, F32, F64 = 0x7F, 0x7E, 0x7D, 0x7C
+FUNCREF, EXTERNREF = 0x70, 0x6F
 
 
 def uleb(n):
@@ -78,6 +79,11 @@ class Module:
         self.globals, self.data, self.elems = [], [], []
         self.table = None
         self.start = None
+        self.raw_imports = []      # raw import entries (bytes) appended after function imports
+        self.tables_raw = []       # raw table entries: reftype + limits
+        self.elem_raw = []         # raw element segments (full encoding incl. flags)
+        self.passive = []          # passive data segments (bytes); indices follow the active ones
+        self.datacount = False
 
     def type(self, params, results):
         t = (tuple(params), tuple(results))
@@ -102,11 +108,13 @@ class Module:
         out = b"\x00asm\x01\x00\x00\x00"
         out += section(1, vec([b"\x60" + vec([bytes([p]) for p in ps]) + vec([bytes([r]) for r in rs])
                                for ps, rs in self.types]))
-        if self.imports:
-            out += section(2, vec([name(m) + name(n) + b"\x00" + uleb(t) for m, n, t in self.imports]))
+        if self.imports or self.raw_imports:
+            out += section(2, vec([name(m) + name(n) + b"\x00" + uleb(t) for m, n, t in self.imports] + self.raw_imports))
         if self.funcs:
             out += section(3, vec([uleb(t) for t, _, _ in self.funcs]))
-        if self.table is not None:
+        if self.tables_raw:
+            out += section(4, vec(self.tables_raw))
+        elif self.table is not None:
             out += section(4, vec([b"\x70\x00" + uleb(self.table)]))
         if self.mem is not None:
             mn, mx = self.mem
@@ -117,8 +125,12 @@ class Module:
             out += section(7, vec([name(n) + bytes([k]) + uleb(i) for n, k, i in self.exports]))
         if self.start is not None:
             out += section(8, uleb(self.start))
-        if self.elems:
+        if self.elem_raw:
+            out += section(9, vec(self.elem_raw))
+        elif self.elems:
             out += section(9, vec([b"\x00" + i32c(off) + b"\x0b" + vec([uleb(f) for f in fs]) for off, fs in self.elems]))
+        if self.datacount or self.passive:
+            out += section(12, uleb(len(self.data) + len(self.passive)))
         if self.funcs:
             bodies = []
             for _, ls, body in self.funcs:
@@ -131,6 +143,25 @@ class Module:
                 b = vec([uleb(c) + bytes([t]) for c, t in groups]) + body + b"\x0b"
                 bodies.append(uleb(len(b)) + b)
             out += section(10, vec(bodies))
-        if self.data:
-            out += section(11, vec([b"\x00" + i32c(off) + b"\x0b" + uleb(len(d)) + d for off, d in self.data]))
+        if self.data or self.passive:
+            out += section(11, vec([b"\x00" + i32c(off) + b"\x0b" + uleb(len(d)) + d for off, d in self.data] +
+                                   [b"\x01" + uleb(len(d)) + d for d in self.passive]))
         return out
+
+
+# ---- reference-type / table / tail-call instruction helpers ----
+def table_get(t): return b"\x25" + uleb(t)
+def table_set(t): return b"\x26" + uleb(t)
+def ref_null(t=FUNCREF): return b"\xd0" + bytes([t])
+REF_IS_NULL = b"\xd1"
+def ref_func(i): return b"\xd2" + uleb(i)
+def table_init(e, t): return b"\xfc\x0c" + uleb(e) + uleb(t)
+def elem_drop(e): return b"\xfc\x0d" + uleb(e)
+def table_copy(d, s): return b"\xfc\x0e" + uleb(d) + uleb(s)
+def table_grow(t): return b"\xfc\x0f" + uleb(t)
+def table_size(t): return b"\xfc\x10" + uleb(t)
+def table_fill(t): return b"\xfc\x11" + uleb(t)
+def return_call(f): return b"\x12" + uleb(f)
+def return_call_indirect(ty, tab=0): return b"\x13" + uleb(ty) + uleb(tab)
+def call_indirect_t(ty, tab): return b"\x11" + uleb(ty) + uleb(tab)
+def limits(mn, mx=None): return (b"\x00" + uleb(mn)) if mx is None else (b"\x01" + uleb(mn) + uleb(mx))

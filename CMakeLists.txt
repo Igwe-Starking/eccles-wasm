@@ -6,7 +6,7 @@ if(ESP_PLATFORM)
     )
 else()
     cmake_minimum_required(VERSION 3.13)
-    project(EcclesWasm VERSION 1.0.0 LANGUAGES C)
+    project(EcclesWasm VERSION 1.1.0 LANGUAGES C)
 
     add_library(eccles_wasm src/eccles_wasm.c)
     add_library(eccles::wasm ALIAS eccles_wasm)

@@ -1,33 +1,44 @@
-# Contributing to ECCLES WASM
+# Contributing to Eccles WASM
 
-Thanks for helping make WebAssembly on microcontrollers better.
+Thanks for helping! Bug reports, new platform backends, WebAssembly features, docs fixes and tests are all welcome.
 
-## Getting set up
+## Ground rules
 
-You need a C99 compiler (GCC or Clang), `make` and Python 3. Node 22 is only needed for the differential fuzzer.
+- **Plain C99, no dependencies.** The runtime is two files (`src/eccles_wasm.c`, `.h`). Keep it that way.
+- **Sandbox first.** Anything a guest can influence must be bounds-checked. A hostile module may trap; it must never touch host memory.
+- **Small by default.** New features should be optional behind a config macro where they cost flash or RAM.
+- **Everything configurable at compile time**, with a clear `#error` when a combination is invalid.
+- **Every behavior change comes with a test.**
 
-```bash
-make test         # unit tests, 5 configurations
-make mocks        # compile-check every hardware backend against SDK stubs
-make examples     # build the host example
-make fuzz         # differential test against Node's WebAssembly engine
+## Dev loop
+
+You need a C99 compiler (GCC or Clang), `make` and Python 3. Node 22 is needed for the differential fuzzer, and clang with `wasm-ld` for `make guests`.
+
+```sh
+make check      # unit tests (5 configs), backend compile-checks, examples, SDK check, dispatch table
+make tsan       # multi-instance threads under ThreadSanitizer
+make chaos      # type-confused modules under ASan + UBSan
+make fuzz       # differential test against Node's WebAssembly engine
+make guests     # compile the C/C++ guests to wasm32 and run them
 ```
 
-CI runs `make test mocks examples` with both GCC and Clang, plus the fuzzer and a sanitizer fuzz run.
-Please run at least `make test mocks` before opening a pull request.
+Use `make CC=clang check` to try another compiler. CI runs all of these on every push and pull request.
 
-## Guidelines
+## Editing the interpreter
 
-- Keep the core portable plain C99 that builds cleanly with `-Wall -Wextra -Wpedantic`.
-- Keep the project small: new features should be optional through a config macro where possible.
-- Add or update tests for behaviour changes (`tests/test_host.c`, or a fixture in `tests/gen_fixtures.py`).
-- Changes to a hardware backend should keep `make mocks` passing. If you tested on real hardware, say which board and SDK version in the pull request.
-- Update `CHANGELOG.md` for user-visible changes.
+The dispatch table is generated: after you add or change an opcode handler, run `python3 tests/gen_dispatch.py` and commit the result. `make check-gen` fails if it is stale.
 
 ## Adding a hardware backend
 
-Fill the function pointers your chip supports in an `eccles_wasm_hal_t`. Anything you leave out returns `ECCLES_WASM_UNSUPPORTED`. See `docs/DESIGN.md` and the existing backends in `src/eccles_wasm.c`.
+1. Fill the function pointers your chip supports in an `eccles_wasm_hal_t`. Anything you leave out answers `UNSUPPORTED`.
+2. Add a compile-check against stub headers in `tests/mocks/` and a line in `make mocks`.
+3. Add an example under `examples/` and a row to the platform table in the README.
+4. Say in the PR which real board and SDK version you verified it on.
 
-## Reporting bugs
+## Adding a test
 
-Open an issue with the platform, compiler, a minimal `.wasm` that reproduces it if you have one, and the output of `eccles_wasm_last_error()`.
+Unit tests live in `tests/test_host.c` and the fixtures in `tests/gen_fixtures.py`. For interpreter behavior, extend the differential fuzzer in `tests/diff_fuzz.py`.
+
+## Commit messages
+
+Short imperative subject line ("Fix br_table bounds check"), details in the body if needed.

@@ -16,6 +16,13 @@ help:
 	@echo "make test       unit tests in 5 configurations (default, static arena, small chunk+mem limit, no-float, -O0 sanitizers)"
 	@echo "make fuzz       differential test against Node's WebAssembly engine (needs node + python3)"
 	@echo "make size       print code size of the object"
+	@echo "make mocks      compile-check every hardware backend against SDK stub headers"
+	@echo "make examples   build the host and multi-instance examples"
+	@echo "make sdk-check  verify the C and Rust guest SDKs against the runtime import table"
+	@echo "make guests     compile the C/C++ guests to wasm32 (needs clang + wasm-ld) and run them on the simulator"
+	@echo "make tsan       run the multi-instance thread test under ThreadSanitizer"
+	@echo "make chaos      run type-confused modules under ASan/UBSan"
+	@echo "make check      test + mocks + examples + sdk-check + check-gen"
 
 $(B):
 	mkdir -p $(B)
@@ -74,3 +81,36 @@ mocks:
 examples: $(B)/example_host
 $(B)/example_host: examples/host/main.c src/eccles_wasm.c src/eccles_wasm.h | $(B)
 	$(CC) $(CSTD) $(WARN) $(OPT) -DECCLES_WASM_HOST_VIRTUAL_TIME $(INC) examples/host/main.c src/eccles_wasm.c -o $@ -lm
+
+.PHONY: chaos
+chaos: $(B)/wsrun_san
+	python3 tests/typeless_chaos.py 1 500
+$(B)/wsrun_san: tests/wsrun.c src/eccles_wasm.c src/eccles_wasm.h | $(B)
+	$(CC) $(CSTD) -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=undefined $(VT) $(INC) tests/wsrun.c src/eccles_wasm.c -o $@ -lm
+
+.PHONY: tsan
+tsan: tests/fixtures.h | $(B)
+	$(CC) $(CSTD) -O1 -g -pthread -fsanitize=thread -DECCLES_WASM_THREADSAFE -DECCLES_WASM_ARENA_SIZE=300000ul $(INC) tests/test_threads.c src/eccles_wasm.c -o $(B)/test_threads -lm
+	$(B)/test_threads
+
+.PHONY: sdk-check check-gen check
+sdk-check: | $(B)
+	python3 tests/check_runtime_sdk.py
+	$(CC) -std=c99 -Wall -Wextra -Wpedantic -O1 -g -fsanitize=address,undefined -Isdk/c tests/test_runtime_sdk.c -o $(B)/test_runtime_sdk && $(B)/test_runtime_sdk
+check-gen:
+	python3 tests/gen_dispatch.py --check && echo "dispatch table up to date"
+
+examples: $(B)/example_multi
+$(B)/example_multi: examples/multi_instance/main.c src/eccles_wasm.c src/eccles_wasm.h | $(B)
+	$(CC) $(CSTD) -O2 -pthread -DECCLES_WASM_THREADSAFE -DECCLES_WASM_HOST_VIRTUAL_TIME -DECCLES_WASM_ARENA_SIZE=300000ul $(INC) examples/multi_instance/main.c src/eccles_wasm.c -o $@ -lm
+
+GUEST_FLAGS := --target=wasm32 -O2 -nostdlib -ffreestanding -Wall -Wextra -Wl,--no-entry -Wl,--export-all -Wl,-z,stack-size=4096 -Wl,--initial-memory=65536 -Isdk/c
+.PHONY: guests
+guests: $(B)/example_host
+	mkdir -p $(B)/guest
+	clang $(GUEST_FLAGS) -o $(B)/guest/blink_c.wasm examples/guest/blink.c
+	clang++ $(GUEST_FLAGS) -fno-exceptions -fno-rtti -o $(B)/guest/blink_cpp.wasm examples/guest/blink.cpp
+	$(B)/example_host $(B)/guest/blink_c.wasm
+	$(B)/example_host $(B)/guest/blink_cpp.wasm
+
+check: test mocks examples sdk-check check-gen

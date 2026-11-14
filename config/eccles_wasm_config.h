@@ -78,15 +78,34 @@
 /* Strip f32/f64 (modules that use floats are then rejected as UNSUPPORTED). */
 // #define ECCLES_WASM_NO_FLOAT
 
+/* Dispatch: computed goto is automatic on GCC/Clang; force the portable switch with: */
+// #define ECCLES_WASM_NO_COMPUTED_GOTO
+
 /* Minimal built-in WASI (fd_write, proc_exit, clock_time_get, ...). */
 // #define ECCLES_WASM_WASI              1
 
 /* Drop the hardware import table (bring only your own host functions). */
 // #define ECCLES_WASM_NO_BUILTIN_IMPORTS
 
-/* Slots for eccles_wasm_register(), and the longest import name matched. */
+/* Slots for eccles_wasm_register() (per instance), imported-global values, and the longest import name matched. */
+// #define ECCLES_WASM_MAX_HOST_GLOBALS  8
 // #define ECCLES_WASM_MAX_HOST_FUNCS    16
 // #define ECCLES_WASM_MAX_NAME          48
+
+/* ===================================================================== *
+ *  threads / several instances
+ * ===================================================================== */
+
+/* Different instances run in parallel on different tasks with no locking inside the interpreter.
+   The chip is shared, so serialise pin/bus access with your RTOS mutex (recursive, held only for
+   short non-blocking operations - sleeps and uart_read never hold it):
+     FreeRTOS : extern SemaphoreHandle_t g_hw_mx;
+                #define ECCLES_WASM_HW_LOCK()    xSemaphoreTakeRecursive(g_hw_mx, portMAX_DELAY)
+                #define ECCLES_WASM_HW_UNLOCK()  xSemaphoreGiveRecursive(g_hw_mx)
+     Zephyr   : extern struct k_mutex g_hw_mx;
+                #define ECCLES_WASM_HW_LOCK()    k_mutex_lock(&g_hw_mx, K_FOREVER)
+                #define ECCLES_WASM_HW_UNLOCK()  k_mutex_unlock(&g_hw_mx)                       */
+// #define ECCLES_WASM_THREADSAFE        /* host build: use a pthread mutex for you */
 
 /* ===================================================================== *
  *  hardware backend

@@ -36,7 +36,12 @@ function toBits(t, v) {
 const out = [];
 for (const c of cases) {
   let inst;
-  try { inst = new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(c.file)), c.imports ? c.imports : {}); }
+  let imp = {};
+  if (c.import_spec) { imp = { env: {} };
+    if (c.import_spec.memory) imp.env.memory = new WebAssembly.Memory({ initial: c.import_spec.memory });
+    if (c.import_spec.table) imp.env.tbl = new WebAssembly.Table({ element: 'anyfunc', initial: c.import_spec.table });
+    if (c.import_spec.global !== undefined) imp.env.g = new WebAssembly.Global({ value: 'i32', mutable: true }, c.import_spec.global); }
+  try { inst = new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(c.file)), imp); }
   catch (e) { out.push({ file: c.file, loadfail: String(e) }); continue; }
   const res = [];
   for (const call of c.calls) {
@@ -232,6 +237,106 @@ def part_a():
     calls += [("rf32", [v]) for v in I32_EDGE] + [("rf64", [v]) for v in I64_EDGE]
     cases.append(Case("float bit ops", m, sigs, calls))
 
+
+    # passive data segments: memory.init / data.drop (segment 0 is active => implicitly dropped)
+    m = Module(); m.mem = (1, None); m.data.append((0, b"ACTIVE")); m.passive = [bytes(range(10, 30)), b"hello passive"]
+    sigs = {}
+    for k in range(3):
+        m.func([I32, I32, I32], [], [], lget(0) + lget(1) + lget(2) + b"\xfc\x08" + uleb(k) + b"\x00", export="init%d" % k); sigs["init%d" % k] = export_sig([I32] * 3, [])
+        m.func([], [], [], b"\xfc\x09" + uleb(k), export="drop%d" % k); sigs["drop%d" % k] = export_sig([], [])
+    m.func([I32], [I32], [], lget(0) + load(0x2D), export="b"); sigs["b"] = export_sig([I32], [I32])
+    calls = [("b", [0]), ("b", [100]), ("init1", [100, 0, 20]), ("b", [100]), ("b", [119]), ("b", [120]), ("init2", [200, 6, 7]), ("b", [200]), ("b", [206]),
+             ("init1", [65530, 0, 7]), ("init1", [65516, 0, 20]), ("init1", [0, 19, 1]), ("init1", [0, 19, 2]), ("init1", [0, 20, 0]), ("init1", [0, 21, 0]),
+             ("init0", [0, 0, 1]), ("init0", [0, 0, 0]), ("init0", [0, 1, 0]), ("drop1", []), ("init1", [300, 0, 1]), ("init1", [300, 0, 0]), ("init1", [300, 1, 0]),
+             ("init2", [300, 0, 13]), ("b", [300]), ("drop2", []), ("drop2", []), ("init2", [300, 0, 1]), ("drop0", []), ("init0", [0, 0, 0])]
+    cases.append(Case("passive data segments", m, sigs, calls))
+
+    # ---- reference types: multiple tables, every element-segment encoding, table ops ----
+    m = Module(); m.mem = None
+    f_inc = m.func([I32], [I32], [], lget(0) + i32c(1) + b"\x6a")          # 0
+    f_dbl = m.func([I32], [I32], [], lget(0) + i32c(2) + b"\x6c")          # 1
+    f_neg = m.func([I32], [I32], [], i32c(0) + lget(0) + b"\x6b")          # 2
+    f_sq = m.func([I32], [I32], [], lget(0) + lget(0) + b"\x6c")           # 3
+    f_i64 = m.func([I64], [I64], [], lget(0))                              # 4 (different signature)
+    tI = m.type([I32], [I32])
+    m.tables_raw = [bytes([FUNCREF]) + limits(8), bytes([FUNCREF]) + limits(6, 20)]
+    e = []
+    e.append(b"\x00" + i32c(0) + b"\x0b" + vec([uleb(f_inc), uleb(f_dbl)]))                             # flag 0: active table 0
+    e.append(b"\x02" + uleb(1) + i32c(1) + b"\x0b" + b"\x00" + vec([uleb(f_neg), uleb(f_sq)]))          # flag 2: active, table 1, funcidx
+    e.append(b"\x04" + i32c(4) + b"\x0b" + vec([ref_func(f_sq) + b"\x0b", ref_null() + b"\x0b", ref_func(f_neg) + b"\x0b"]))   # flag 4: exprs, table 0
+    e.append(b"\x06" + uleb(1) + i32c(4) + b"\x0b" + bytes([FUNCREF]) + vec([ref_func(f_inc) + b"\x0b"]))                    # flag 6: exprs, table 1
+    e.append(b"\x01\x00" + vec([uleb(f_dbl), uleb(f_neg), uleb(f_sq)]))                                  # flag 1: passive (segment 4)
+    e.append(b"\x05" + bytes([FUNCREF]) + vec([ref_func(f_inc) + b"\x0b", ref_null() + b"\x0b"]))        # flag 5: passive exprs (segment 5)
+    e.append(b"\x03\x00" + vec([uleb(f_i64)]))                                                           # flag 3: declarative (declares f_i64)
+    m.elem_raw = e
+    m.func([I32, I32], [I32], [], lget(1) + lget(0) + call_indirect_t(tI, 0), export="ct0")
+    m.func([I32, I32], [I32], [], lget(1) + lget(0) + call_indirect_t(tI, 1), export="ct1")
+    m.func([I32, I32], [I32], [], lget(0) + table_get(0) + REF_IS_NULL, export="null0")
+    m.func([I32, I32], [I32], [], lget(1) + table_get(1) + REF_IS_NULL, export="null1")
+    m.func([I32, I32], [], [], lget(0) + ref_func(f_sq) + table_set(0), export="setsq")
+    m.func([I32], [], [], lget(0) + ref_null() + table_set(1), export="clr1")
+    m.func([I32, I32, I32], [], [], lget(0) + lget(1) + lget(2) + table_init(4, 0), export="tinit4")
+    m.func([I32, I32, I32], [], [], lget(0) + lget(1) + lget(2) + table_init(5, 1), export="tinit5")
+    m.func([], [], [], elem_drop(4), export="drop4")
+    m.func([I32, I32, I32], [], [], lget(0) + lget(1) + lget(2) + table_copy(1, 0), export="tcopy10")
+    m.func([I32, I32, I32], [], [], lget(0) + lget(1) + lget(2) + table_copy(0, 1), export="tcopy01")
+    m.func([I32, I32], [], [], lget(0) + ref_func(f_dbl) + lget(1) + table_fill(0), export="tfill0")
+    m.func([], [I32], [], table_size(0) + table_size(1) + b"\x6a", export="tsizes")
+    m.func([], [I32], [], ref_null() + i32c(0) + table_grow(0), export="grow0")
+    m.func([], [I32], [], ref_null() + i32c(1) + table_grow(0), export="grow1")
+    sg = {k: export_sig(ps, rs) for k, (ps, rs) in {"ct0": ([I32, I32], [I32]), "ct1": ([I32, I32], [I32]), "null0": ([I32, I32], [I32]), "null1": ([I32, I32], [I32]),
+          "setsq": ([I32, I32], []), "clr1": ([I32], []), "tinit4": ([I32] * 3, []), "tinit5": ([I32] * 3, []), "drop4": ([], []),
+          "tcopy10": ([I32] * 3, []), "tcopy01": ([I32] * 3, []), "tfill0": ([I32, I32], []), "tsizes": ([], [I32]), "grow0": ([], [I32]), "grow1": ([], [I32])}.items()}
+    calls = [("ct0", [i, 10]) for i in range(0, 9)] + [("ct1", [i, 10]) for i in range(0, 7)] + [("null0", [i, 0]) for i in range(0, 9)] + [("null1", [0, i]) for i in range(0, 7)]
+    calls += [("tsizes", []), ("grow0", []), ("setsq", [6, 0]), ("ct0", [6, 9]), ("clr1", [0]), ("ct1", [0, 3]), ("null1", [0, 0]),
+              ("tinit4", [0, 0, 3]), ("ct0", [0, 7]), ("ct0", [1, 7]), ("ct0", [2, 7]), ("tinit4", [6, 2, 1]), ("tinit4", [7, 2, 2]), ("tinit4", [0, 3, 1]), ("tinit4", [0, 3, 0]),
+              ("tinit5", [0, 0, 2]), ("ct1", [0, 5]), ("null1", [0, 1]), ("tinit5", [5, 1, 2]), ("tcopy10", [0, 0, 6]), ("ct1", [3, 4]), ("tcopy01", [2, 1, 4]), ("ct0", [3, 4]),
+              ("tcopy01", [6, 0, 3]), ("tcopy10", [0, 7, 1]), ("tfill0", [1, 3]), ("ct0", [2, 11]), ("tfill0", [7, 2]), ("tfill0", [8, 1]), ("tfill0", [9, 0]),
+              ("drop4", []), ("tinit4", [0, 0, 1]), ("tinit4", [0, 0, 0]), ("tinit4", [0, 1, 0]), ("drop4", [])]
+    cases.append(Case("reference types / multi-table / element forms", m, sg, calls))
+
+    # ---- tail calls (must not grow the stack) ----
+    m = Module()
+    tSum = m.type([I32, I32], [I32])
+    sumf = m.func([I32, I32], [I32], [], b"")
+    body = lget(0) + b"\x45" + if_(bt(I32), lget(1), lget(0) + i32c(1) + b"\x6b" + lget(1) + lget(0) + b"\x6a" + return_call(sumf))
+    m.funcs[sumf] = (m.funcs[sumf][0], [], body)
+    m.exports.append(("sum", 0, sumf))
+    m.table = 2
+    ev = m.func([I32], [I32], [], lget(0) + b"\x45" + if_(bt(I32), i32c(1), lget(0) + i32c(1) + b"\x6b" + i32c(1) + return_call_indirect(m.type([I32], [I32]), 0)))   # even -> odd
+    od = m.func([I32], [I32], [], lget(0) + b"\x45" + if_(bt(I32), i32c(0), lget(0) + i32c(1) + b"\x6b" + i32c(0) + return_call_indirect(m.type([I32], [I32]), 0)))
+    m.elems.append((0, [ev, od]))
+    m.func([I32], [I32], [], lget(0) + call(ev), export="isEven")
+    sg = {"sum": export_sig([I32, I32], [I32]), "isEven": export_sig([I32], [I32])}
+    cases.append(Case("tail calls", m, sg, [("sum", [n, 0]) for n in (0, 1, 10, 1000, 100000)] + [("isEven", [n]) for n in (0, 1, 2, 7, 10, 5001)]))
+
+    # ---- imported memory / table / mutable global, extended-const initialisers ----
+    m = Module()
+    m.raw_imports = [name("env") + name("memory") + b"\x02" + limits(1),
+                     name("env") + name("tbl") + b"\x01" + bytes([FUNCREF]) + limits(4),
+                     name("env") + name("g") + b"\x03" + bytes([I32, 1])]
+    m.globals.append((I32, 0, i32c(10) + i32c(3) + i32c(4) + b"\x6c" + b"\x6a"))                 # 22 (extended const)
+    m.globals.append((I64, 0, i64c(1 << 40) + i64c(5) + b"\x7c" + i64c(2) + b"\x7e"))            # (2^40 + 5) * 2
+    m.globals.append((I32, 1, i32c(100)))
+    f0 = m.func([I32], [I32], [], lget(0) + i32c(7) + b"\x6a")
+    f1 = m.func([I32], [I32], [], lget(0) + gget(1) + b"\x6c")                                   # * extended-const global
+    m.elems.append((1, [f0, f1]))
+    m.data.append((8, b"imported memory ok"))
+    tI = m.type([I32], [I32])
+    m.func([], [I32], [], gget(0) + i32c(1) + b"\x6a" + gset(0) + gget(0), export="bump")
+    m.func([], [I32], [], gget(1) + gget(3) + b"\x6a", export="ext")
+    m.func([], [I64], [], gget(2), export="ext64")
+    m.func([I32, I32], [I32], [], lget(1) + lget(0) + call_indirect_t(tI, 0), export="ci")
+    m.func([I32], [I32], [], lget(0) + load(0x2D), export="byte")
+    m.func([], [I32], [], MEMSIZE, export="pages")
+    sg = {"bump": export_sig([], [I32]), "ext": export_sig([], [I32]), "ext64": export_sig([], [I64]), "ci": export_sig([I32, I32], [I32]),
+          "byte": export_sig([I32], [I32]), "pages": export_sig([], [I32])}
+    cs = Case("imported memory/table/global + extended const", m, sg,
+              [("bump", []), ("bump", []), ("ext", []), ("ext64", []), ("pages", []), ("byte", [8]), ("byte", [9]), ("byte", [65535]), ("byte", [65536])] +
+              [("ci", [i, 6]) for i in range(0, 5)])
+    cs.import_spec = {"memory": 1, "table": 4, "global": 0}
+    cases.append(cs)
+
     # stack/call depth limits - the *reference* engine has far larger limits, so only the
     # shallow behaviour is compared here; deep recursion is covered by test_host.c.
     return cases
@@ -410,7 +515,7 @@ def run(cases, keep, binary):
         path = os.path.join(tmp, "m%04d.wasm" % i)
         open(path, "wb").write(c.bytes)
         c.path = path
-        manifest.append({"file": path, "exports": c.exports,
+        manifest.append({"file": path, "exports": c.exports, "import_spec": getattr(c, "import_spec", None),
                          "calls": [[nm] + ["%x" % a for a in args] for nm, args in c.calls]})
     mf = os.path.join(tmp, "manifest.json"); open(mf, "w").write(json.dumps(manifest))
     js = os.path.join(tmp, "ref.js"); open(js, "w").write(NODE_JS)

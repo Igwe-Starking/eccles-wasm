@@ -1,23 +1,52 @@
 name: CI
-on: [push, pull_request]
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
 defaults:
   run:
     shell: bash
+
 jobs:
   host:
+    name: ${{ matrix.cc }}
     runs-on: ubuntu-latest
-    strategy: { matrix: { cc: [gcc, clang] } }
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y clang
-      - run: make CC=${{ matrix.cc }} test mocks examples
+      - name: Tests, backend compile-checks, examples, SDK check
+        run: make CC=${{ matrix.cc }} check
+
+  guests:
+    name: C/C++ guests to wasm32
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y clang lld
+      - run: make guests
+
+  threads:
+    name: ThreadSanitizer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make tsan
+
   fuzz:
+    name: Differential fuzz + chaos
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
       - run: make fuzz
+      - run: make chaos
       - run: |
           make build/test_san
           gcc -std=c99 -O1 -g -fsanitize=address,undefined -DECCLES_WASM_HOST_VIRTUAL_TIME -Isrc tests/wsrun.c src/eccles_wasm.c -o build/wsrun_san -lm

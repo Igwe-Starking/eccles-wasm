@@ -1,0 +1,59 @@
+#######################################
+# Syntax Coloring Map For Eccles WASM
+#######################################
+
+#######################################
+# Datatypes (KEYWORD1)
+#######################################
+
+eccles_wasm_status_t	KEYWORD1
+eccles_wasm_vm_t	KEYWORD1
+eccles_wasm_hal_t	KEYWORD1
+eccles_wasm_stats_t	KEYWORD1
+eccles_wasm_host_fn	KEYWORD1
+eccles_wasm_read_fn	KEYWORD1
+
+#######################################
+# Methods and Functions (KEYWORD2)
+#######################################
+
+eccles_wasm_init	KEYWORD2
+eccles_wasm_load	KEYWORD2
+eccles_wasm_load_buffer	KEYWORD2
+eccles_wasm_load_stream	KEYWORD2
+eccles_wasm_unload	KEYWORD2
+eccles_wasm_run	KEYWORD2
+eccles_wasm_call	KEYWORD2
+eccles_wasm_has_export	KEYWORD2
+eccles_wasm_set_fuel	KEYWORD2
+eccles_wasm_last_error	KEYWORD2
+eccles_wasm_last_error_info	KEYWORD2
+eccles_wasm_error_name	KEYWORD2
+eccles_wasm_register	KEYWORD2
+eccles_wasm_mem	KEYWORD2
+eccles_wasm_get_stats	KEYWORD2
+eccles_wasm_hal_override	KEYWORD2
+eccles_wasm_set_fs	KEYWORD2
+eccles_wasm_vm_create	KEYWORD2
+eccles_wasm_use_serial	KEYWORD2
+eccles_wasm_use_wire	KEYWORD2
+eccles_wasm_use_spi	KEYWORD2
+eccles_wasm_use_uart	KEYWORD2
+eccles_wasm_enable	KEYWORD2
+eccles_wasm_disable	KEYWORD2
+eccles_wasm_toggle	KEYWORD2
+eccles_wasm_sleep	KEYWORD2
+eccles_wasm_millis	KEYWORD2
+
+#######################################
+# Constants (LITERAL1)
+#######################################
+
+ECCLES_WASM_SUCCESSFUL	LITERAL1
+ECCLES_WASM_FAILED	LITERAL1
+ECCLES_WASM_UNSUPPORTED	LITERAL1
+ECCLES_WASM_ARENA_SIZE	LITERAL1
+ECCLES_WASM_TOTAL_RAM_SIZE	LITERAL1
+ECCLES_WASM_MEM_LIMIT_BYTES	LITERAL1
+ECCLES_WASM_CHUNK_SIZE	LITERAL1
+ECCLES_WASM_CALL_DEPTH	LITERAL1

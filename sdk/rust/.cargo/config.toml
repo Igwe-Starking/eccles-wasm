@@ -1,0 +1,10 @@
+# Settings for building guest modules that run on small chips. Copy next to your crate's Cargo.toml.
+[build]
+target = "wasm32-unknown-unknown"
+
+[target.wasm32-unknown-unknown]
+rustflags = [
+    "-C", "link-arg=-zstack-size=4096",       # guest stack lives in linear memory: keep it small
+    "-C", "link-arg=--initial-memory=65536",  # one wasm page (the host can back less with ECCLES_WASM_MEM_LIMIT_BYTES)
+    "-C", "link-arg=--max-memory=65536",
+]

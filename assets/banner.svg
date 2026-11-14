@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 400" width="1280" height="400" role="img" aria-labelledby="bt bd">
+<title id="bt">Eccles WASM</title>
+<desc id="bd">Eccles WASM: a WebAssembly runtime for microcontrollers. A single .wasm module is loaded, validated and run on any chip, with a portable hardware API that returns SUCCESSFUL, FAILED or UNSUPPORTED.</desc>
+<style>
+.t{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif} .m{font-family:SFMono-Regular,Consolas,'Liberation Mono',Menlo,monospace}
+@keyframes f{0%,42%{opacity:1}50%,88%{opacity:.16}96%,100%{opacity:1}}
+.b{animation:f 7s ease-in-out infinite}
+@media (prefers-reduced-motion:reduce){.b{animation:none}}
+</style>
+<defs>
+<linearGradient id="bgb" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0b1220"/><stop offset="1" stop-color="#111c33"/></linearGradient>
+<linearGradient id="acb" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#22d3ee"/><stop offset="1" stop-color="#a78bfa"/></linearGradient>
+<radialGradient id="gvb" cx="0.5" cy="0.5" r="0.5"><stop offset="0" stop-color="#a78bfa" stop-opacity=".28"/><stop offset="1" stop-color="#a78bfa" stop-opacity="0"/></radialGradient>
+<radialGradient id="gcb" cx="0.5" cy="0.5" r="0.5"><stop offset="0" stop-color="#22d3ee" stop-opacity=".22"/><stop offset="1" stop-color="#22d3ee" stop-opacity="0"/></radialGradient>
+<pattern id="dotsb" width="28" height="28" patternUnits="userSpaceOnUse"><circle cx="2" cy="2" r="1.2" fill="#94a3b8" opacity=".14"/></pattern>
+</defs>
+<rect width="1280" height="400" fill="url(#bgb)"/>
+<rect width="1280" height="400" fill="url(#dotsb)"/>
+<circle cx="1120" cy="60" r="330" fill="url(#gvb)"/>
+<circle cx="120" cy="380" r="300" fill="url(#gcb)"/>
+<g transform="translate(80,66) scale(0.95)">
+<rect width="96" height="96" rx="22" fill="#0f172a" stroke="#334155" stroke-width="2"/>
+<rect x="26" y="8" width="6" height="11" rx="2" fill="#22d3ee"/><rect x="26" y="77" width="6" height="11" rx="2" fill="#22d3ee"/><rect x="8" y="26" width="11" height="6" rx="2" fill="#818cf8"/><rect x="77" y="26" width="11" height="6" rx="2" fill="#818cf8"/><rect x="41" y="8" width="6" height="11" rx="2" fill="#22d3ee"/><rect x="41" y="77" width="6" height="11" rx="2" fill="#22d3ee"/><rect x="8" y="41" width="11" height="6" rx="2" fill="#818cf8"/><rect x="77" y="41" width="11" height="6" rx="2" fill="#818cf8"/><rect x="56" y="8" width="6" height="11" rx="2" fill="#22d3ee"/><rect x="56" y="77" width="6" height="11" rx="2" fill="#22d3ee"/><rect x="8" y="56" width="11" height="6" rx="2" fill="#818cf8"/><rect x="77" y="56" width="11" height="6" rx="2" fill="#818cf8"/><rect x="71" y="8" width="6" height="11" rx="2" fill="#22d3ee"/><rect x="71" y="77" width="6" height="11" rx="2" fill="#22d3ee"/><rect x="8" y="71" width="11" height="6" rx="2" fill="#818cf8"/><rect x="77" y="71" width="11" height="6" rx="2" fill="#818cf8"/>
+<rect x="22" y="22" width="52" height="52" rx="9" fill="#0b1220" stroke="#334155" stroke-width="1.5"/>
+<path d="M30 33 L38.5 63 L48 42 L57.5 63 L66 33" fill="none" stroke="url(#acb)" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
+</g>
+<text x="186" y="136" class="t" font-size="66" font-weight="800" fill="url(#acb)">ECCLES WASM</text><text x="82" y="214" class="t" font-size="30" fill="#e2e8f0">WebAssembly for chips</text><text x="82" y="252" class="t" font-size="30" fill="#e2e8f0">that never ran an OS.</text>
+<rect x="80" y="277" width="128.9" height="38" rx="19" fill="#0f172a" stroke="#334155"/><text x="144.45" y="302" text-anchor="middle" font-family="SFMono-Regular,Consolas,'Liberation Mono',Menlo,monospace" font-size="17" fill="#e2e8f0">plain C99</text><rect x="220.9" y="277" width="139" height="38" rx="19" fill="#0f172a" stroke="#334155"/><text x="290.4" y="302" text-anchor="middle" font-family="SFMono-Regular,Consolas,'Liberation Mono',Menlo,monospace" font-size="17" fill="#e2e8f0">sandboxed</text><rect x="372" y="277" width="190" height="38" rx="19" fill="#0f172a" stroke="#334155"/><text x="467.0" y="302" text-anchor="middle" font-family="SFMono-Regular,Consolas,'Liberation Mono',Menlo,monospace" font-size="17" fill="#e2e8f0">C · C++ · Rust</text>
+<rect x="760" y="56" width="430" height="288" rx="20" fill="#0f172a" fill-opacity=".9" stroke="#334155"/><text x="784" y="92" class="m" font-size="13" fill="#94a3b8">one .wasm · any chip · sandboxed</text><circle cx="1160" cy="88" r="5" fill="#34d399" class="b" style="animation-duration:3s"/><text x="784" y="122" class="m" font-size="15" fill="#94a3b8"><tspan fill="#22d3ee">$</tspan> eccles_wasm_load("/app.wasm")</text><text x="784" y="147" class="m" font-size="15" fill="#34d399">SUCCESSFUL</text><text x="784" y="172" class="m" font-size="15" fill="#94a3b8"><tspan fill="#22d3ee">$</tspan> eccles_wasm_run("loop")</text><text x="784" y="197" class="m" font-size="15" fill="#e2e8f0">pin 2 → 1</text><text x="784" y="222" class="m" font-size="15" fill="#e2e8f0">pin 2 → 0</text><text x="784" y="247" class="m" font-size="15" fill="#fbbf24">ew_dac()  → UNSUPPORTED</text><text x="784" y="272" class="m" font-size="15" fill="#94a3b8">guest handles it, keeps running</text><text x="784" y="322" class="m" font-size="12" fill="#94a3b8" letter-spacing="1.5">GPIO 2</text><circle cx="870" cy="317" r="7" fill="#22d3ee" class="b" style="animation-duration:2s"/><rect x="900" y="307" width="22" height="20" rx="4" fill="#818cf8" class="b" style="animation-duration:5.0s;animation-delay:-0.0s"/><rect x="930" y="307" width="22" height="20" rx="4" fill="#a78bfa" class="b" style="animation-duration:6.7s;animation-delay:-1.3s"/><rect x="960" y="307" width="22" height="20" rx="4" fill="#22d3ee" class="b" style="animation-duration:8.4s;animation-delay:-2.6s"/>
+</svg>

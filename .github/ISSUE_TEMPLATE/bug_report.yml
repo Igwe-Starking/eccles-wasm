@@ -1,0 +1,39 @@
+name: Bug report
+description: Something misbehaves (wrong result, trap, crash, build error, a backend that does not work on your board)
+labels: [bug]
+body:
+  - type: input
+    id: target
+    attributes:
+      label: Board and toolchain
+      description: Chip/board, SDK or core version, compiler and version
+      placeholder: "ESP32-S3, Arduino-ESP32 3.0.5, xtensa-esp32s3-elf-gcc 12.2"
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: Configuration
+      description: Every ECCLES_WASM_* macro you set (or "defaults")
+      render: c
+    validations:
+      required: true
+  - type: textarea
+    id: module
+    attributes:
+      label: Module
+      description: How you built the .wasm (compiler, flags, language) and, if you can, attach it or the source
+    validations:
+      required: true
+  - type: textarea
+    id: error
+    attributes:
+      label: Result of eccles_wasm_error_name(eccles_wasm_last_error())
+      description: Include eccles_wasm_last_error_info() if it is non-zero
+      render: text
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs. actual behavior
+    validations:
+      required: true

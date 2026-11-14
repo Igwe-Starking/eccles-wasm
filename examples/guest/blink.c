@@ -1,13 +1,17 @@
-/* The guest behind examples/blink.wasm (see make_blink_wasm.py for the byte-exact build used by the examples). */
-#include "eccles_wasm_guest.h"
+/* clang --target=wasm32 -O2 -nostdlib -ffreestanding -Wl,--no-entry -Wl,-z,stack-size=4096 \
+ *       -Wl,--initial-memory=65536 -I../../sdk/c -o blink.wasm blink.c                          */
+#define EW_ARDUINO_COMPAT              /* optional: pinMode/digitalWrite/delay/millis names */
+#include "eccles_wasm_runtime.h"
 
 #define LED 2
-static const char hello[] = "eccles_wasm guest up\n";
 
-EW_EXPORT("setup") void setup(void) { ew_log(hello, (int)sizeof hello - 1); }
-EW_EXPORT("loop")  void loop(void)  { ew_enable(LED); ew_sleep(500); ew_disable(LED); ew_sleep(500); }
-EW_EXPORT("blink") int blink(int pin, int count) {
-    int st = 0;
-    while (count-- > 0) { ew_enable(pin); ew_sleep(100); st = ew_disable(pin); ew_sleep(100); }
-    return st;
+EW_EXPORT("setup") void setup(void) {
+    pinMode(LED, OUTPUT);
+    ew_printf("blink up at %u ms (pin %d)\n", (unsigned)millis(), LED);
+    if (ew_dac(25, 100) == EW_UNSUPPORTED) ew_println("no DAC on this chip - fine");
+}
+
+EW_EXPORT("loop") void loop(void) {
+    digitalWrite(LED, HIGH); delay(500);
+    digitalWrite(LED, LOW);  delay(500);
 }

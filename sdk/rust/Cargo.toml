@@ -1,0 +1,19 @@
+[package]
+name = "eccles-wasm-runtime"
+version = "1.1.0"
+edition = "2021"
+description = "Guest-side API for ECCLES WASM: GPIO, PWM, ADC, I2C, SPI, UART, timing and logging from no_std Rust compiled to wasm32."
+license = "MIT"
+repository = "https://github.com/igwe-starking/eccles-wasm"
+keywords = ["wasm", "embedded", "no_std", "gpio", "microcontroller"]
+categories = ["embedded", "no-std", "wasm"]
+
+[features]
+default = ["panic-handler"]
+# #[panic_handler] that logs "panic" and traps - enable for the final cdylib, disable if another crate provides one.
+panic-handler = []
+# embedded-hal 1.0 trait impls: lets any embedded-hal driver crate (BME280, SSD1306, ...) run inside the module.
+embedded-hal = ["dep:embedded-hal"]
+
+[dependencies]
+embedded-hal = { version = "1.0", optional = true }

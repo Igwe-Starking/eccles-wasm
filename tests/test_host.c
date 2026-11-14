@@ -39,8 +39,8 @@ static eccles_wasm_status_t cap_log(const uint8_t *b, uint32_t n) {
 }
 static uint8_t g_wr[64]; static unsigned g_nwr;
 static eccles_wasm_status_t cap_write(uint32_t pin, uint32_t lvl) { if (g_nwr < sizeof g_wr) g_wr[g_nwr++] = (uint8_t)(lvl ? 1 : 0); (void)pin; return OK; }
-static eccles_wasm_status_t host_add3(uint64_t *s) { s[0] = (uint32_t)(s[0] + s[1] + s[2]); return OK; }
-static eccles_wasm_status_t host_boom(uint64_t *s) { (void)s; return BAD; }
+static eccles_wasm_status_t host_add3(eccles_wasm_vm_t *vm, uint64_t *s) { (void)vm; s[0] = (uint32_t)(s[0] + s[1] + s[2]); return OK; }
+static eccles_wasm_status_t host_boom(eccles_wasm_vm_t *vm, uint64_t *s) { (void)vm; (void)s; return BAD; }
 
 static void t_blink(void) {
     uint32_t t0, t1;
@@ -282,8 +282,30 @@ static void t_direct(void) {
       CHECK_EQ(eccles_wasm_uart_write(0, tx, 3), OK); CHECK_EQ(eccles_wasm_uart_write(5, tx, 3), BAD); }
 }
 
+static void t_vms(void) {
+    static uint8_t a1[200 * 1024] __attribute__((aligned(8))), a2[200 * 1024] __attribute__((aligned(8)));
+    eccles_wasm_vm_t *v1 = eccles_wasm_vm_create(a1, sizeof a1), *v2 = eccles_wasm_vm_create(a2, sizeof a2);
+    uint64_t r[2];
+    puts("explicit instances / imported globals");
+    CHECK(v1 && v2 && v1 != v2);
+    CHECK_EQ(eccles_wasm_vm_load_buffer(v1, fx_start, sizeof fx_start), OK);
+    CHECK_EQ(eccles_wasm_vm_load_buffer(v2, fx_runaway, sizeof fx_runaway), OK);
+    CHECK_EQ(eccles_wasm_vm_call(v1, "g", NULL, 0, r, 1), OK); CHECK_EQ(r[0], 1234);
+    CHECK_EQ(eccles_wasm_vm_run(v2, "recurse"), BAD);                          /* v2 traps ... */
+    CHECK_EQ(eccles_wasm_vm_last_error(v2), ECCLES_WASM_TRAP_CALL_DEPTH);
+    CHECK_EQ(eccles_wasm_vm_last_error(v1), ECCLES_WASM_OK);                   /* ... v1 is unaffected */
+    CHECK(!eccles_wasm_vm_has_export(v1, "spin") && eccles_wasm_vm_has_export(v2, "spin"));
+    CHECK_EQ(eccles_wasm_vm_load_buffer(v1, fx_impglobal, sizeof fx_impglobal), OK);       /* imported global defaults to 0 */
+    CHECK_EQ(eccles_wasm_vm_call(v1, "base_plus_one", NULL, 0, r, 1), OK); CHECK_EQ(r[0], 1);
+    CHECK_EQ(eccles_wasm_vm_set_global(v1, "__memory_base", 4096), OK);
+    CHECK_EQ(eccles_wasm_vm_load_buffer(v1, fx_impglobal, sizeof fx_impglobal), OK);
+    CHECK_EQ(eccles_wasm_vm_call(v1, "base_plus_one", NULL, 0, r, 1), OK); CHECK_EQ(r[0], 4097);
+    CHECK_EQ(eccles_wasm_vm_create(a1, 100) == NULL, 1);
+    eccles_wasm_vm_destroy(v1); eccles_wasm_vm_destroy(v2);
+}
+
 static void t_arena(void) {
-    static uint8_t tiny[5000] __attribute__((aligned(8)));
+    static uint8_t tiny[6200] __attribute__((aligned(8)));
     puts("arena exhaustion");
     CHECK_EQ(eccles_wasm_init_with(tiny, sizeof tiny), OK);
     CHECK_EQ(LOAD(fx_blink), BAD); CHECK_EQ(eccles_wasm_last_error(), ECCLES_WASM_ERR_NO_MEMORY);
@@ -306,6 +328,7 @@ int main(void) {
 #else
     t_float();
 #endif
+    t_vms();
     t_arena();
     printf("%d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;
