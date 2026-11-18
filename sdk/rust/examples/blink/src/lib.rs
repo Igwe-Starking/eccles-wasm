@@ -14,6 +14,7 @@ pub extern "C" fn setup() {
     match BUTTON.input_pullup().and_then(|_| BUTTON.irq_attach(Edge::Falling)) {
         Ok(()) => println!("button interrupts on"),
         Err(Error::Unsupported) => println!("this chip has no pin-interrupt support"),
+        Err(Error::Denied) => println!("the host has not granted pin interrupts to this module"),
         Err(Error::Failed) => println!("button setup failed"),
     }
 }

@@ -1,0 +1,8 @@
+.pio/
+.vscode/
+sdkconfig.esp32dev
+sdkconfig.*.old
+build/
+out/
+deliver/
+__pycache__/

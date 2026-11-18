@@ -8,6 +8,7 @@
 
 int main(void) {
     stdio_init_all();
+    eccles_wasm_set_hal_privilege(ECCLES_WASM_ALLOW_PIN_ALL | ECCLES_WASM_ALLOW_SAFE);     /* v2: grant what the module may use */
     if (eccles_wasm_load_buffer(blink_wasm, sizeof blink_wasm) != ECCLES_WASM_SUCCESSFUL) return 1;
     eccles_wasm_run("setup");               /* guest LED = GP2 (use 25 for the on-board LED: edit the guest) */
     for (;;) eccles_wasm_run("loop");

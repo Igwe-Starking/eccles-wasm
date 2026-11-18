@@ -8,12 +8,12 @@ INC     := -Isrc
 VT      := -DECCLES_WASM_HOST_VIRTUAL_TIME
 B       := build
 
-.PHONY: all test fuzz san clean size help examples mocks
+.PHONY: all test fuzz san clean size help examples mocks wasm-threads
 all: $(B)/wsrun
 
 help:
 	@echo "make            build the wsrun CLI ($(B)/wsrun)"
-	@echo "make test       unit tests in 5 configurations (default, static arena, small chunk+mem limit, no-float, -O0 sanitizers)"
+	@echo "make test       unit tests in 7 configurations (default, static arena, small chunk+mem limit, no-float, atomics+threads, switch dispatch, sanitizers)"
 	@echo "make fuzz       differential test against Node's WebAssembly engine (needs node + python3)"
 	@echo "make size       print code size of the object"
 	@echo "make mocks      compile-check every hardware backend against SDK stub headers"
@@ -21,6 +21,7 @@ help:
 	@echo "make sdk-check  verify the C and Rust guest SDKs against the runtime import table"
 	@echo "make guests     compile the C/C++ guests to wasm32 (needs clang + wasm-ld) and run them on the simulator"
 	@echo "make tsan       run the multi-instance thread test under ThreadSanitizer"
+	@echo "make wasm-threads  wasi-threads test: a module spawns sibling instances over shared memory (TSan, ASan, plain)"
 	@echo "make chaos      run type-confused modules under ASan/UBSan"
 	@echo "make check      test + mocks + examples + sdk-check + check-gen"
 
@@ -42,15 +43,19 @@ $(eval $(call TESTBIN,default,))
 $(eval $(call TESTBIN,static,-DECCLES_WASM_USE_HEAP=0 -DECCLES_WASM_ARENA_SIZE=300000ul))
 $(eval $(call TESTBIN,small,-DECCLES_WASM_CHUNK_SIZE=16 -DECCLES_WASM_MEM_LIMIT_BYTES=4096 -DECCLES_WASM_VALUE_STACK_SLOTS=300 -DTEST_MEMLIMIT))
 $(eval $(call TESTBIN,nofloat,-DECCLES_WASM_NO_FLOAT -DTEST_NOFLOAT))
+$(eval $(call TESTBIN,atomics,-DECCLES_WASM_ATOMICS=1 -DECCLES_WASM_THREADS=1))
+$(eval $(call TESTBIN,switch,-DECCLES_WASM_NO_COMPUTED_GOTO))
+$(eval $(call TESTBIN,iram,-DECCLES_WASM_EXEC_IRAM=1 '-DECCLES_WASM_IRAM_ATTR=__attribute__((section(".iram_test")))'))
 SAN := -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=undefined
 $(eval $(call TESTBIN,san,$(SAN)))
 
-test: $(B)/test_default $(B)/test_static $(B)/test_small $(B)/test_nofloat $(B)/test_san
-	@for t in default static small nofloat san; do echo "== $$t =="; $(B)/test_$$t || exit 1; done
+test: $(B)/test_default $(B)/test_static $(B)/test_small $(B)/test_nofloat $(B)/test_atomics $(B)/test_switch $(B)/test_iram $(B)/test_san
+	@for t in default static small nofloat atomics switch san; do echo "== $$t =="; $(B)/test_$$t || exit 1; done
 	@echo "ALL TEST CONFIGURATIONS PASSED"
 
-fuzz: $(B)/wsrun
+fuzz: $(B)/wsrun $(B)/wsrun_atomics
 	python3 tests/diff_fuzz.py --seed 1 --random-modules 300 --cf-modules 600
+	python3 tests/diff_fuzz.py --seed 2 --random-modules 50 --cf-modules 100 --atomics --binary $(B)/wsrun_atomics
 
 size:
 	$(CC) $(CSTD) -Os $(INC) -DECCLES_WASM_PLATFORM=ECCLES_WASM_PLAT_NONE -DECCLES_WASM_ARENA_SIZE=65536ul -c src/eccles_wasm.c -o $(B)/size.o
@@ -60,7 +65,7 @@ clean:
 	rm -rf $(B)
 
 # ---- compile-checks of every hardware backend against SDK stub headers (see tests/mocks/README.md) ----
-MOCKW := -std=c99 -Wall -Wextra -Wpedantic -Werror -fsyntax-only -Isrc
+MOCKW := -std=c99 -Wall -Wextra -Wpedantic -Werror -c -o /dev/null -Isrc
 .PHONY: mocks
 mocks:
 	@echo "arduino (C backend, AVR-less ARM-like)";  $(CC) $(MOCKW) -DARDUINO -DECCLES_WASM_TOTAL_RAM_SIZE=262144ul -Itests/mocks/arduino src/eccles_wasm.c
@@ -75,6 +80,14 @@ mocks:
 	@echo "littlefs";   $(CC) $(MOCKW) -DECCLES_WASM_PLATFORM=ECCLES_WASM_PLAT_NONE -DECCLES_WASM_ARENA_SIZE=65536ul -DECCLES_WASM_FS=ECCLES_WASM_FS_LITTLEFS '-DECCLES_WASM_LFS_PTR=(&my_lfs)' -Itests/mocks/fs src/eccles_wasm.c
 	@echo "bare / unknown MCU (all UNSUPPORTED + overrides)"; $(CC) $(MOCKW) -DECCLES_WASM_PLATFORM=ECCLES_WASM_PLAT_NONE -DECCLES_WASM_ARENA_SIZE=65536ul src/eccles_wasm.c
 	@echo "no-float + no-fuel + no-builtin-imports + no-wasi + lenient"; $(CC) $(MOCKW) -DECCLES_WASM_NO_FLOAT -DECCLES_WASM_FUEL=0 -DECCLES_WASM_NO_BUILTIN_IMPORTS -DECCLES_WASM_WASI=0 -DECCLES_WASM_LENIENT_IMPORTS src/eccles_wasm.c
+	@echo "atomics + threads"; $(CC) $(MOCKW) -DECCLES_WASM_ATOMICS=1 -DECCLES_WASM_THREADS=1 src/eccles_wasm.c
+	@echo "atomics, no float, no hardware imports"; $(CC) $(MOCKW) -DECCLES_WASM_ATOMICS=1 -DECCLES_WASM_NO_FLOAT -DECCLES_WASM_NO_BUILTIN_IMPORTS -DECCLES_WASM_WASI=0 src/eccles_wasm.c
+	@echo "exec in iram: esp-idf";  $(CC) $(MOCKW) -DECCLES_WASM_EXEC_IRAM=1 -DESP_PLATFORM -Itests/mocks/esp_idf src/eccles_wasm.c
+	@echo "exec in iram: arduino-esp32";  $(CC) $(MOCKW) -DECCLES_WASM_EXEC_IRAM=1 -DARDUINO -DARDUINO_ARCH_ESP32 -Itests/mocks/arduino src/eccles_wasm.c
+	@echo "exec in iram: pico";  $(CC) $(MOCKW) -DECCLES_WASM_EXEC_IRAM=1 -DPICO_BUILD -Itests/mocks/pico src/eccles_wasm.c
+	@echo "exec in iram: stm32";  $(CC) $(MOCKW) -DECCLES_WASM_EXEC_IRAM=1 -DUSE_HAL_DRIVER -DECCLES_WASM_TOTAL_RAM_SIZE=131072ul -Itests/mocks/stm32 src/eccles_wasm.c
+	@echo "exec in iram: zephyr";  $(CC) $(MOCKW) -DECCLES_WASM_EXEC_IRAM=1 -D__ZEPHYR__ -DCONFIG_REBOOT -DCONFIG_ENTROPY_GENERATOR -DECCLES_WASM_ARENA_SIZE=65536ul -Itests/mocks/zephyr src/eccles_wasm.c
+	@echo "exec in iram: host + own attribute";  $(CC) $(MOCKW) -DECCLES_WASM_EXEC_IRAM=1 '-DECCLES_WASM_IRAM_ATTR=__attribute__((section(".iram_test")))' src/eccles_wasm.c
 	@echo "yield hook";  $(CC) $(MOCKW) -DECCLES_WASM_YIELD_INTERVAL=1024 '-DECCLES_WASM_YIELD()=((void)0)' src/eccles_wasm.c
 	@echo "ALL BACKEND COMPILE-CHECKS PASSED"
 
@@ -105,7 +118,7 @@ $(B)/example_multi: examples/multi_instance/main.c src/eccles_wasm.c src/eccles_
 	$(CC) $(CSTD) -O2 -pthread -DECCLES_WASM_THREADSAFE -DECCLES_WASM_HOST_VIRTUAL_TIME -DECCLES_WASM_ARENA_SIZE=300000ul $(INC) examples/multi_instance/main.c src/eccles_wasm.c -o $@ -lm
 
 GUEST_FLAGS := --target=wasm32 -O2 -nostdlib -ffreestanding -Wall -Wextra -Wl,--no-entry -Wl,--export-all -Wl,-z,stack-size=4096 -Wl,--initial-memory=65536 -Isdk/c
-.PHONY: guests
+.PHONY: guests wiki wiki-examples wiki-check
 guests: $(B)/example_host
 	mkdir -p $(B)/guest
 	clang $(GUEST_FLAGS) -o $(B)/guest/blink_c.wasm examples/guest/blink.c
@@ -113,4 +126,25 @@ guests: $(B)/example_host
 	$(B)/example_host $(B)/guest/blink_c.wasm
 	$(B)/example_host $(B)/guest/blink_cpp.wasm
 
+wiki-examples:
+	@bash examples/wiki/run.sh
+
+wiki: wiki-examples
+	@python3 tools/build_wiki.py
+
+wiki-check: wiki-examples
+	@python3 tools/build_wiki.py --check
+
 check: test mocks examples sdk-check check-gen
+
+.PHONY: wasm-threads
+wasm-threads: tests/fixtures.h
+	$(CC) $(CSTD) -O1 -g -pthread -fsanitize=thread -DECCLES_WASM_ATOMICS=1 -DECCLES_WASM_THREADS=1 -DECCLES_WASM_THREADSAFE -DECCLES_WASM_ARENA_SIZE=300000ul $(INC) tests/test_wasm_threads.c src/eccles_wasm.c -o $(B)/test_wasm_threads -lm
+	$(B)/test_wasm_threads
+	$(CC) $(CSTD) -O2 -pthread -DECCLES_WASM_ATOMICS=1 -DECCLES_WASM_THREADS=1 -DECCLES_WASM_THREADSAFE -DECCLES_WASM_ARENA_SIZE=300000ul $(INC) tests/test_wasm_threads.c src/eccles_wasm.c -o $(B)/test_wasm_threads_fast -lm
+	$(B)/test_wasm_threads_fast
+	$(CC) $(CSTD) -O2 -g -pthread -fsanitize=address,undefined -DECCLES_WASM_ATOMICS=1 -DECCLES_WASM_THREADS=1 -DECCLES_WASM_THREADSAFE -DECCLES_WASM_ARENA_SIZE=300000ul $(INC) tests/test_wasm_threads.c src/eccles_wasm.c -o $(B)/test_wasm_threads_asan -lm
+	$(B)/test_wasm_threads_asan
+
+$(B)/wsrun_atomics: tests/wsrun.c src/eccles_wasm.c src/eccles_wasm.h | $(B)
+	$(CC) $(CSTD) $(OPT) -DECCLES_WASM_ATOMICS=1 -DECCLES_WASM_THREADS=1 $(VT) $(INC) tests/wsrun.c src/eccles_wasm.c -o $@ -lm

@@ -304,6 +304,131 @@ static void t_vms(void) {
     eccles_wasm_vm_destroy(v1); eccles_wasm_vm_destroy(v2);
 }
 
+static int g_denied_hook;
+static void on_denied(eccles_wasm_vm_t *vm, const char *op) { (void)vm; (void)op; g_denied_hook++; }
+static eccles_wasm_status_t pcall(eccles_wasm_vm_t *vm, const char *n, uint32_t a, uint32_t b) {   /* returns the guest-visible status */
+    uint64_t args[2], r[1] = { 99 }; unsigned k;
+    args[0] = a; args[1] = b;
+    for (k = 0; k <= 2; k++) {
+        eccles_wasm_status_t s = eccles_wasm_vm_call(vm, n, args, k, r, 1);
+        if (eccles_wasm_vm_last_error(vm) != ECCLES_WASM_ERR_SIGNATURE) return s == OK ? (eccles_wasm_status_t)r[0] : (eccles_wasm_status_t)99;
+    }
+    return (eccles_wasm_status_t)98;
+}
+#define DEN ECCLES_WASM_DENIED
+static void t_privilege(void) {
+    static uint8_t arena[200 * 1024] __attribute__((aligned(8)));
+    eccles_wasm_vm_t *vm = eccles_wasm_vm_create(arena, sizeof arena);
+    eccles_wasm_privilege_t p, q;
+    puts("hardware privilege");
+    CHECK(vm != NULL);
+    CHECK_EQ(eccles_wasm_vm_load_buffer(vm, fx_perm, sizeof fx_perm), OK);
+    eccles_wasm_sim_reset();
+    eccles_wasm_vm_set_denied_hook(vm, on_denied);
+
+    /* 1. a fresh instance is deny-all: nothing reaches the chip */
+    CHECK_EQ(pcall(vm, "p_enable", 5, 0), DEN); CHECK_EQ(pcall(vm, "p_write", 5, 1), DEN); CHECK_EQ(pcall(vm, "p_mode", 5, 1), DEN);
+    CHECK_EQ(pcall(vm, "p_read", 5, 0), DEN); CHECK_EQ(pcall(vm, "p_analog", 5, 9), DEN); CHECK_EQ(pcall(vm, "p_adc", 3, 0), DEN);
+    CHECK_EQ(pcall(vm, "p_irq", 3, 0), DEN); CHECK_EQ(pcall(vm, "p_sleep", 1, 0), DEN); CHECK_EQ(pcall(vm, "p_millis", 0, 0), DEN);
+    CHECK_EQ(pcall(vm, "p_log", 0, 0), DEN); CHECK_EQ(pcall(vm, "p_wdt", 0, 0), DEN); CHECK_EQ(pcall(vm, "p_reset", 0, 0), DEN);
+    CHECK_EQ(pcall(vm, "p_deep", 1, 0), DEN); CHECK_EQ(pcall(vm, "p_random", 0, 0), DEN); CHECK_EQ(pcall(vm, "p_uart", 0, 0xFFFFFFFFu), DEN);
+    CHECK_EQ(pcall(vm, "p_i2c", 0, 0x50), DEN); CHECK_EQ(pcall(vm, "p_spi", 0, 0), DEN); CHECK_EQ(pcall(vm, "p_toggle", 5, 0), DEN);
+    CHECK_EQ(eccles_wasm_sim_pin_level(5), 0); CHECK_EQ(eccles_wasm_sim_pin_mode(5), 0); CHECK(!eccles_wasm_sim_reset_requested());
+    CHECK_EQ(eccles_wasm_vm_denied_count(vm), 18); CHECK_EQ(g_denied_hook, 18); CHECK(strcmp(eccles_wasm_vm_last_denied(vm), "toggle") == 0);
+    /* host code is trusted: the C API is never restricted */
+    CHECK_EQ(eccles_wasm_enable(5), OK); CHECK_EQ(eccles_wasm_sim_pin_level(5), 1); eccles_wasm_sim_reset();
+
+    /* 2. ALLOW_ALL */
+    CHECK_EQ(eccles_wasm_vm_set_hal_privilege(vm, ECCLES_WASM_ALLOW_ALL), OK);
+    CHECK_EQ(pcall(vm, "p_enable", 5, 0), OK); CHECK_EQ(eccles_wasm_sim_pin_level(5), 1);
+    CHECK_EQ(pcall(vm, "p_read", 5, 0), OK); CHECK_EQ(pcall(vm, "p_millis", 0, 0), OK); CHECK_EQ(pcall(vm, "p_random", 0, 0), OK);
+    CHECK_EQ(pcall(vm, "p_reset", 0, 0), OK); CHECK(eccles_wasm_sim_reset_requested());
+    CHECK_EQ(pcall(vm, "p_spi", 0, 0), OK);
+    CHECK_EQ(pcall(vm, "p_analog", 5, 999), BAD);                                  /* a real failure is FAILED, not DENIED */
+
+    /* 3. READ_ONLY: observe, never actuate */
+    eccles_wasm_sim_reset();
+    CHECK_EQ(eccles_wasm_vm_set_hal_privilege(vm, ECCLES_WASM_ALLOW_READ_ONLY), OK);
+    CHECK_EQ(pcall(vm, "p_read", 5, 0), OK); CHECK_EQ(pcall(vm, "p_adc", 3, 0), OK); CHECK_EQ(pcall(vm, "p_millis", 0, 0), OK);
+    CHECK_EQ(pcall(vm, "p_log", 0, 0), OK); CHECK_EQ(pcall(vm, "p_random", 0, 0), OK);
+    CHECK_EQ(pcall(vm, "p_enable", 5, 0), DEN); CHECK_EQ(pcall(vm, "p_write", 5, 1), DEN); CHECK_EQ(pcall(vm, "p_mode", 5, 1), DEN);
+    CHECK_EQ(pcall(vm, "p_analog", 5, 1), DEN); CHECK_EQ(pcall(vm, "p_irq", 5, 0), DEN); CHECK_EQ(pcall(vm, "p_uart", 0, 0xFFFFFFFFu), DEN);
+    CHECK_EQ(pcall(vm, "p_i2c", 0, 0x50), DEN); CHECK_EQ(pcall(vm, "p_reset", 0, 0), DEN); CHECK_EQ(pcall(vm, "p_deep", 1, 0), DEN);
+    CHECK_EQ(eccles_wasm_sim_pin_level(5), 0); CHECK(!eccles_wasm_sim_reset_requested());
+
+    /* 4. PIN_ALL: every pin operation, but no buses / power / time */
+    CHECK_EQ(eccles_wasm_vm_set_hal_privilege(vm, ECCLES_WASM_ALLOW_PIN_ALL), OK);
+    CHECK_EQ(pcall(vm, "p_enable", 7, 0), OK); CHECK_EQ(pcall(vm, "p_mode", 7, 0), OK); CHECK_EQ(pcall(vm, "p_analog", 7, 10), OK);
+    CHECK_EQ(pcall(vm, "p_irq", 7, 0), OK); CHECK_EQ(pcall(vm, "p_irq_count", 7, 0), OK);
+    CHECK_EQ(pcall(vm, "p_i2c", 0, 0x50), DEN); CHECK_EQ(pcall(vm, "p_uart", 0, 0xFFFFFFFFu), DEN);
+    CHECK_EQ(pcall(vm, "p_sleep", 1, 0), DEN); CHECK_EQ(pcall(vm, "p_reset", 0, 0), DEN);
+
+    /* 5. pin allow-list: single pins + a range; everything else (including out-of-table pins) refused */
+    eccles_wasm_privilege_init(&p, ECCLES_WASM_ALLOW_PIN_ALL);
+    CHECK_EQ(eccles_wasm_privilege_allow_pin(&p, 5), OK); CHECK_EQ(eccles_wasm_privilege_allow_pin_range(&p, 10, 12), OK);
+    CHECK_EQ(eccles_wasm_privilege_allow_pin(&p, 256), BAD); CHECK_EQ(eccles_wasm_privilege_allow_pin_range(&p, 9, 3), BAD);
+    CHECK_EQ(eccles_wasm_vm_set_privilege(vm, &p), OK);
+    CHECK_EQ(pcall(vm, "p_enable", 5, 0), OK); CHECK_EQ(pcall(vm, "p_enable", 11, 0), OK); CHECK_EQ(pcall(vm, "p_mode", 12, 1), OK); CHECK_EQ(pcall(vm, "p_write", 12, 1), OK);
+    CHECK_EQ(pcall(vm, "p_enable", 6, 0), DEN); CHECK_EQ(pcall(vm, "p_enable", 13, 0), DEN); CHECK_EQ(pcall(vm, "p_enable", 9, 0), DEN);
+    CHECK_EQ(pcall(vm, "p_read", 4, 0), DEN); CHECK_EQ(pcall(vm, "p_adc", 255, 0), DEN); CHECK_EQ(pcall(vm, "p_enable", 4000, 0), DEN);
+    CHECK_EQ(pcall(vm, "p_irq", 6, 0), DEN);
+    CHECK_EQ(eccles_wasm_sim_pin_level(6), 0); CHECK_EQ(eccles_wasm_sim_pin_level(13), 0);
+
+    /* 6. bus allow-lists, I2C address list, and pins named in bus setup must be allowed too */
+    eccles_wasm_privilege_init(&p, ECCLES_WASM_ALLOW_BUSES);
+    CHECK_EQ(eccles_wasm_privilege_allow_bus(&p, ECCLES_WASM_BUS_I2C, 1), OK);
+    CHECK_EQ(eccles_wasm_privilege_allow_i2c_addr(&p, 0x50, 0x57), OK);
+    CHECK_EQ(eccles_wasm_privilege_allow_bus(&p, ECCLES_WASM_BUS_UART, 16), BAD); CHECK_EQ(eccles_wasm_privilege_allow_i2c_addr(&p, 0, 128), BAD);
+    CHECK_EQ(eccles_wasm_vm_set_privilege(vm, &p), OK);
+    CHECK_EQ(pcall(vm, "p_i2c", 1, 0x50), OK); CHECK_EQ(pcall(vm, "p_i2c", 1, 0x57), OK);
+    CHECK_EQ(pcall(vm, "p_i2c", 0, 0x50), DEN); CHECK_EQ(pcall(vm, "p_i2c", 1, 0x68), DEN); CHECK_EQ(pcall(vm, "p_i2c", 1, 0x58), DEN);
+    CHECK_EQ(pcall(vm, "p_uart", 0, 0xFFFFFFFFu), OK); CHECK_EQ(pcall(vm, "p_spi", 0, 0), OK);   /* UART/SPI buses unrestricted here */
+    eccles_wasm_privilege_init(&p, ECCLES_WASM_PERM_UART);
+    eccles_wasm_privilege_allow_pin(&p, 1);
+    eccles_wasm_vm_set_privilege(vm, &p);
+    CHECK_EQ(pcall(vm, "p_uart", 0, 1), OK);                 /* tx pin 1 is in the pin list */
+    CHECK_EQ(pcall(vm, "p_uart", 0, 2), DEN);                /* tx pin 2 is not */
+    CHECK_EQ(pcall(vm, "p_uart", 0, 0xFFFFFFFFu), OK);       /* -1 = board default needs no pin right */
+
+    /* 7. get/set round trip, independence of instances, reload keeps the policy */
+    eccles_wasm_vm_get_privilege(vm, &q); CHECK(!memcmp(&p, &q, sizeof p));
+    { static uint8_t arena2[200 * 1024] __attribute__((aligned(8))); eccles_wasm_vm_t *v2 = eccles_wasm_vm_create(arena2, sizeof arena2);
+      CHECK_EQ(eccles_wasm_vm_load_buffer(v2, fx_perm, sizeof fx_perm), OK);
+      eccles_wasm_vm_set_hal_privilege(v2, ECCLES_WASM_ALLOW_ALL);
+      CHECK_EQ(pcall(v2, "p_enable", 20, 0), OK); CHECK_EQ(pcall(vm, "p_enable", 20, 0), DEN);
+      eccles_wasm_vm_destroy(v2); }
+    CHECK_EQ(eccles_wasm_vm_load_buffer(vm, fx_perm, sizeof fx_perm), OK);
+    CHECK_EQ(pcall(vm, "p_enable", 20, 0), DEN);
+
+    /* 8. WASI honours the same policy: fd_write needs LOG; hostile iovec arguments are refused */
+    { static uint8_t arena3[200 * 1024] __attribute__((aligned(8))); eccles_wasm_vm_t *w = eccles_wasm_vm_create(arena3, sizeof arena3);
+      eccles_wasm_hal_t h; memset(&h, 0, sizeof h); h.log = cap_log; eccles_wasm_hal_override(&h);
+      CHECK_EQ(eccles_wasm_vm_load_buffer(w, fx_wasi_iov, sizeof fx_wasi_iov), OK);
+      g_loglen = 0; g_log[0] = 0;
+      CHECK_EQ(pcall(w, "fdw", 0, 1), 76u);                                             /* ENOTCAPABLE, nothing printed */
+      CHECK_EQ(g_loglen, 0);
+      eccles_wasm_vm_set_hal_privilege(w, ECCLES_WASM_PERM_LOG);
+      CHECK_EQ(pcall(w, "fdw", 0, 1), 0u); CHECK(strcmp(g_log, "hello") == 0);
+      CHECK_EQ(pcall(w, "fdw", 0, 0x20000001u), 28u);                                   /* n*8 would wrap a 32-bit multiply */
+      CHECK_EQ(pcall(w, "fdw", 65530, 2), 28u);                                         /* iovec array runs off the end of memory */
+      CHECK_EQ(pcall(w, "fdw", 0, 0), 0u);                                              /* zero entries is fine */
+      eccles_wasm_hal_reset(); eccles_wasm_vm_destroy(w); }
+    eccles_wasm_vm_destroy(vm);
+}
+
+static void t_wasi_clock(void) {
+    uint64_t r[1], a[1], t1, t2; uint32_t i;
+    puts("WASI clock_time_get argument layout");
+    CHECK_EQ(LOAD(fx_clock), OK);
+    CHECK_EQ(call("now", 0, 0, 0), OK); CHECK_EQ(R[0], 0);                    /* errno 0, result written at 200 */
+    CHECK_EQ(call("nap", 0, 0, 0), OK);                                       /* advance the (virtual) clock by 7 ms */
+    CHECK_EQ(call("now_prec", 0, 0, 0), OK); CHECK_EQ(R[0], 0);               /* non-zero precision argument, result at 208 */
+    { const uint8_t *m0 = eccles_wasm_mem(0, 8); for (i = 0; i < 8; i++) CHECK_EQ(m0[i], 0xAA); }     /* address 0 untouched */
+    a[0] = 200; CHECK_EQ(eccles_wasm_call("rd64", a, 1, r, 1), OK); t1 = r[0];
+    a[0] = 208; CHECK_EQ(eccles_wasm_call("rd64", a, 1, r, 1), OK); t2 = r[0];
+    CHECK(t2 - t1 >= 7000000u && t2 - t1 < 8000000u);                         /* ~7 ms in nanoseconds */
+}
+
 static void t_arena(void) {
     static uint8_t tiny[6200] __attribute__((aligned(8)));
     puts("arena exhaustion");
@@ -320,6 +445,7 @@ static void t_arena(void) {
 int main(void) {
     printf("eccles_wasm %s  chunk=%d arena=%lu\n", ECCLES_WASM_VERSION_STRING, ECCLES_WASM_CHUNK_SIZE, (unsigned long)ECCLES_WASM_ARENA_SIZE);
     CHECK_EQ(eccles_wasm_init_with(g_arena, sizeof g_arena), OK);
+    CHECK_EQ(eccles_wasm_set_hal_privilege(ECCLES_WASM_ALLOW_ALL), OK);          /* the default instance runs the hardware tests */
     t_direct();
     t_blink(); t_wasi(); t_start(); t_runaway(); t_link(); t_corrupt();
     t_features(); t_stream(); t_memory();
@@ -329,6 +455,8 @@ int main(void) {
     t_float();
 #endif
     t_vms();
+    t_wasi_clock();
+    t_privilege();
     t_arena();
     printf("%d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;

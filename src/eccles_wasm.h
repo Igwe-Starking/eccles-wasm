@@ -32,10 +32,12 @@
 //so the guest can find out what the chip it landed on is able to do
 //imports are matched by the field name only and the "eccles_wasm_" prefix is optional
 //
-//supported: wasm 1.0 core + sign extension, saturating float->int, bulk memory, multi value,
-//reference types, tail calls and extended const (this is what clang and rustc emit by default)
-//NOT supported: simd, threads/atomics, exception handling, gc, multiple memories, memory64
+//supported: wasm 1.0 core + sign extension, saturating float->int, bulk memory, multi value, reference types
+//(multiple tables), tail calls, extended const, mutable globals and imported memory/table/globals
+//atomics + threads are optional (ECCLES_WASM_ATOMICS / ECCLES_WASM_THREADS)
+//NOT supported: simd, exception handling, gc, multiple memories, memory64
 //the load fails with ECCLES_WASM_UNSUPPORTED and eccles_wasm_last_error_info() tells you the opcode
+//memory.grow and table.grow only work with a delta of 0 and return -1 otherwise (allowed by the spec)
 //
 //validation is structural only. it checks every index, branch target, block nesting and the stack height
 //and every memory/table access is bounds checked at run time, so a bad module cant touch memory outside its own
@@ -43,7 +45,7 @@
 //
 //memory: everything lives in ONE arena. module data + translated code grow up from the bottom, the value stack,
 //call stack and the guest memory sit at the top. a wasm page is 64kb so a stock module needs about 64kb + code + stacks
-//on small chips use ECCLES_WASM_MEM_LIMIT_BYTES. memory.grow(0) works, grow(n>0) returns -1 (fixed size memory)
+//on small chips use ECCLES_WASM_MEM_LIMIT_BYTES
 //avr / msp430 / 8051 are not supported targets, there is no ram for it
 //
 //all the config macros are described in eccles_wasm_config.h (or pass them with -D), every file must see the same ones
@@ -64,10 +66,10 @@
   #endif
 #endif
 
-#define ECCLES_WASM_VERSION_MAJOR 1
-#define ECCLES_WASM_VERSION_MINOR 1
+#define ECCLES_WASM_VERSION_MAJOR 2
+#define ECCLES_WASM_VERSION_MINOR 0
 #define ECCLES_WASM_VERSION_PATCH 0
-#define ECCLES_WASM_VERSION_STRING "1.1.0"
+#define ECCLES_WASM_VERSION_STRING "2.0.0"
 
 #ifdef __cplusplus
 extern "C" {
@@ -194,6 +196,10 @@ extern "C" {
 #ifndef ECCLES_WASM_YIELD_INTERVAL
   #define ECCLES_WASM_YIELD_INTERVAL 0
 #endif
+//ECCLES_WASM_EXEC_IRAM: 1 puts the interpreter loop (w_exec) in internal ram, off by default (see eccles_wasm_config.h)
+#ifndef ECCLES_WASM_EXEC_IRAM
+  #define ECCLES_WASM_EXEC_IRAM 0
+#endif
 #ifndef ECCLES_WASM_AUTORUN_START
   #define ECCLES_WASM_AUTORUN_START 1
 #endif
@@ -205,6 +211,21 @@ extern "C" {
 #endif
 #ifndef ECCLES_WASM_ANALOG_FREQ_HZ
   #define ECCLES_WASM_ANALOG_FREQ_HZ 1000u
+#endif
+#ifndef ECCLES_WASM_ATOMICS
+  #define ECCLES_WASM_ATOMICS 0  //1: threads-proposal atomic instructions + shared memory (needs GCC/Clang __atomic builtins)
+#endif
+#ifndef ECCLES_WASM_THREADS
+  #define ECCLES_WASM_THREADS 0  //1: wasi-threads thread-spawn + eccles_wasm_vm_spawn() (needs ECCLES_WASM_ATOMICS)
+#endif
+#if ECCLES_WASM_THREADS && !ECCLES_WASM_ATOMICS
+  #error "eccles_wasm: ECCLES_WASM_THREADS needs ECCLES_WASM_ATOMICS=1."
+#endif
+#ifndef ECCLES_WASM_PIN_FILTER_BITS
+  #define ECCLES_WASM_PIN_FILTER_BITS 256  //pins 0..255 can be allow-listed (multiple of 8)
+#endif
+#ifndef ECCLES_WASM_DEFAULT_PRIVILEGE
+  #define ECCLES_WASM_DEFAULT_PRIVILEGE ECCLES_WASM_ALLOW_NONE  //deny by default: the host must grant hardware access
 #endif
 #ifndef ECCLES_WASM_MAX_IRQ
   #define ECCLES_WASM_MAX_IRQ 4
@@ -227,6 +248,7 @@ extern "C" {
 #endif
 
 #if defined(ECCLES_WASM_THREADSAFE) && !defined(ECCLES_WASM_HW_LOCK) && ECCLES_WASM_PLATFORM == ECCLES_WASM_PLAT_HOST && !defined(_WIN32)
+  #define ECCLES_WASM_HOST_PTHREAD_LOCK 1  //tells eccles_wasm.c to provide the pthread mutex
   void eccles_wasm_host_lock(void);  //pthread mutex, see eccles_wasm.c
   void eccles_wasm_host_unlock(void);
   #define ECCLES_WASM_HW_LOCK()   eccles_wasm_host_lock()
@@ -243,7 +265,8 @@ extern "C" {
 typedef enum {
     ECCLES_WASM_SUCCESSFUL = 0,  //did it
     ECCLES_WASM_FAILED     = 1,  //tried and failed (bad pin, bus error, trap, ...)
-    ECCLES_WASM_UNSUPPORTED = 2  //this chip / backend / module cant do that
+    ECCLES_WASM_UNSUPPORTED = 2,  //this chip / backend / module cant do that
+    ECCLES_WASM_DENIED   = 3  //the instance's hardware privilege forbids it (guest imports only)
 } eccles_wasm_status_t;
 
 //detailed reason behind the last FAILED/UNSUPPORTED - eccles_wasm_last_error().
@@ -274,7 +297,8 @@ typedef enum {
     ECCLES_WASM_TRAP_CALL_DEPTH,  //call stack exhausted
     ECCLES_WASM_TRAP_FUEL,  //instruction budget exhausted
     ECCLES_WASM_TRAP_HOST,  //a host function reported failure
-    ECCLES_WASM_TRAP_TABLE_OOB  //out-of-bounds table access (table.get/set/copy/init/fill)
+    ECCLES_WASM_TRAP_TABLE_OOB,  //out-of-bounds table access (table.get/set/copy/init/fill)
+    ECCLES_WASM_TRAP_ATOMIC  //unaligned atomic access, or atomic wait on a non-shared memory
 } eccles_wasm_error_t;
 
 typedef enum {
@@ -293,16 +317,16 @@ typedef enum {
 
 //runtime: init / load / call
 
-//read callback for eccles_wasm_load_stream(), fill buf with up to max bytes and return how many you wrote
-//0 = end of data, negative = error
+//read callback for eccles_wasm_load_stream(): fill `buf` with up to `max`
+//bytes, return how many you wrote; 0 = end of data; negative = error.
 typedef int (*eccles_wasm_read_fn)(void *ctx, uint8_t *buf, size_t max);
 
-//sets up the arena (static array or malloc()), you dont have to call it because load does it for you
-//calling it twice does nothing
+//set up the arena (static array or malloc()). Optional: eccles_wasm_load*()
+//calls it for you. Calling it again is a safe no-op.
 eccles_wasm_status_t eccles_wasm_init(void);
 
-//same but with memory you give us (psram, external sram, a linker section)
-//mem must be 8 byte aligned and stay valid, it replaces the old arena
+//same, but over memory you provide (PSRAM, external SRAM, a linker section).
+//`mem` must be 8-byte aligned and stay valid. Replaces any earlier arena.
 eccles_wasm_status_t eccles_wasm_init_with(void *mem, size_t size);
 
 //loads a module from a file on the platform filesystem, it is read in small chunks (ECCLES_WASM_CHUNK_SIZE)
@@ -320,7 +344,7 @@ eccles_wasm_status_t eccles_wasm_load_stream(eccles_wasm_read_fn read, void *ctx
 eccles_wasm_status_t eccles_wasm_unload(void);
 
 //call an exported function. args and results are raw 64bit slots: i32 in the low 32 bits, i64 as it is,
-//f32/f64 as thier ieee bit patterns (there are from_/to_ helpers for that below)
+//f32/f64 as their ieee bit patterns (there are from_/to_ helpers for that below)
 //nargs must be the same as the parameter count of the function. results can be NULL, at most max_results slots are written
 //when it fails look at eccles_wasm_last_error()
 eccles_wasm_status_t eccles_wasm_call(const char *export_name,
@@ -334,17 +358,17 @@ eccles_wasm_status_t eccles_wasm_run(const char *export_name);
 bool eccles_wasm_has_export(const char *export_name);
 
 //instruction budget for one eccles_wasm_call(), calls and backward branches cost 1 each. 0 means unlimited
-//with a budget an endless loop in the guest traps with ECCLES_WASM_TRAP_FUEL insted of freezing the chip
+//with a budget an endless loop in the guest traps with ECCLES_WASM_TRAP_FUEL instead of freezing the chip
 void eccles_wasm_set_fuel(uint32_t budget);
 
-//why the last operation failed, plus one extra datum (byte offset, opcode or
-//bytes-needed depending on the error) and, for import errors, the name.
+//why the last operation failed, plus one extra number (byte offset, opcode or bytes needed, depends on the error)
+//and for import errors the name
 eccles_wasm_error_t eccles_wasm_last_error(void);
 uint32_t          eccles_wasm_last_error_info(void);
 const char       *eccles_wasm_last_error_str(void);  //name of the unresolved import, or ""
 const char       *eccles_wasm_error_name(eccles_wasm_error_t e);
 
-//after a guest calld WASI proc_exit(code): true + the code.
+//after a guest called WASI proc_exit(code): true + the code.
 bool eccles_wasm_exited(int32_t *exit_code);
 
 typedef struct {
@@ -360,7 +384,7 @@ typedef struct {
 } eccles_wasm_stats_t;
 eccles_wasm_stats_t eccles_wasm_get_stats(void);
 
-//---- helpers for raw slots --------------------------------------------
+//helpers for raw slots
 static inline uint64_t eccles_wasm_from_i32(int32_t v)  { return (uint64_t)(uint32_t)v; }
 static inline uint64_t eccles_wasm_from_i64(int64_t v)  { return (uint64_t)v; }
 static inline uint64_t eccles_wasm_from_f32(float v)    { uint32_t u; uint8_t *s = (uint8_t*)&v, *d = (uint8_t*)&u; d[0]=s[0]; d[1]=s[1]; d[2]=s[2]; d[3]=s[3]; return u; }
@@ -369,6 +393,64 @@ static inline int32_t  eccles_wasm_to_i32(uint64_t v)   { return (int32_t)(uint3
 static inline int64_t  eccles_wasm_to_i64(uint64_t v)   { return (int64_t)v; }
 static inline float    eccles_wasm_to_f32(uint64_t v)   { uint32_t u = (uint32_t)v; float f; uint8_t *s = (uint8_t*)&u, *d = (uint8_t*)&f; d[0]=s[0]; d[1]=s[1]; d[2]=s[2]; d[3]=s[3]; return f; }
 static inline double   eccles_wasm_to_f64(uint64_t v)   { double f; uint8_t *s = (uint8_t*)&v, *d = (uint8_t*)&f; for (int i = 0; i < 8; i++) d[i] = s[i]; return f; }
+
+
+//hardware privilege = what a module is allowed to do with the chip
+//every instance has a policy, it is only checked for the imports a guest calls, host c code calling eccles_wasm_enable() etc is trusted
+//the DEFAULT IS DENY-ALL (change it with ECCLES_WASM_DEFAULT_PRIVILEGE), a fresh instance can only compute until its owner grants something
+//a refused call is not a trap, the guest just gets ECCLES_WASM_DENIED (3) back and nothing happens
+//build a policy with privilege_init + allow_pin / allow_pin_range / allow_bus / allow_i2c_addr and then set it (the README has an example)
+//the policy belongs to the instance and survives reloading a module, the owner can change it between calls to run() / call()
+#define ECCLES_WASM_PERM_GPIO_READ    (1u << 0)  //read
+#define ECCLES_WASM_PERM_GPIO_WRITE   (1u << 1)  //enable, disable, toggle, write (drive a pin)
+#define ECCLES_WASM_PERM_GPIO_CONFIG  (1u << 2)  //mode (direction / pulls)
+#define ECCLES_WASM_PERM_ANALOG_OUT   (1u << 3)  //analog, pwm, dac
+#define ECCLES_WASM_PERM_ADC          (1u << 4)  //adc
+#define ECCLES_WASM_PERM_IRQ          (1u << 5)  //irq_attach / count / clear / detach
+#define ECCLES_WASM_PERM_UART         (1u << 6)
+#define ECCLES_WASM_PERM_I2C          (1u << 7)
+#define ECCLES_WASM_PERM_SPI          (1u << 8)
+#define ECCLES_WASM_PERM_TIME         (1u << 9)  //millis, micros, sleep, sleep_us, yield (+ WASI clock/sched_yield)
+#define ECCLES_WASM_PERM_RANDOM       (1u << 10)
+#define ECCLES_WASM_PERM_LOG          (1u << 11)  //console output (+ WASI fd_write)
+#define ECCLES_WASM_PERM_WDT          (1u << 12)  //wdt_feed
+#define ECCLES_WASM_PERM_POWER        (1u << 13)  //deep_sleep, reset - device-wide effects
+#define ECCLES_WASM_PERM_THREADS      (1u << 14)  //wasi-threads thread-spawn (ECCLES_WASM_THREADS)
+
+#define ECCLES_WASM_ALLOW_NONE        0u
+#define ECCLES_WASM_ALLOW_SAFE        (ECCLES_WASM_PERM_TIME | ECCLES_WASM_PERM_RANDOM | ECCLES_WASM_PERM_LOG)
+#define ECCLES_WASM_ALLOW_READ_ONLY   (ECCLES_WASM_PERM_GPIO_READ | ECCLES_WASM_PERM_ADC | ECCLES_WASM_ALLOW_SAFE)
+#define ECCLES_WASM_ALLOW_PIN_ALL     (ECCLES_WASM_PERM_GPIO_READ | ECCLES_WASM_PERM_GPIO_WRITE | ECCLES_WASM_PERM_GPIO_CONFIG | \
+                                       ECCLES_WASM_PERM_ANALOG_OUT | ECCLES_WASM_PERM_ADC | ECCLES_WASM_PERM_IRQ)
+#define ECCLES_WASM_ALLOW_BUSES       (ECCLES_WASM_PERM_UART | ECCLES_WASM_PERM_I2C | ECCLES_WASM_PERM_SPI)
+#define ECCLES_WASM_ALLOW_ALL         0x7FFFu
+
+typedef enum { ECCLES_WASM_BUS_UART = 0, ECCLES_WASM_BUS_I2C = 1, ECCLES_WASM_BUS_SPI = 2 } eccles_wasm_bus_t;
+
+typedef struct {
+    uint32_t perms;  //ECCLES_WASM_PERM_* bits
+    uint8_t  pins_restricted;  //0: every pin the perms allow; 1: only pin_bits
+    uint8_t  bus_restricted;  //bit0 UART, bit1 I2C, bit2 SPI: restrict to the lists below
+    uint8_t  i2c_addr_restricted;
+    uint8_t  reserved_;
+    uint16_t uart_ports, i2c_buses, spi_buses;  //allowed bus numbers 0..15 (when restricted)
+    uint8_t  pin_bits[ECCLES_WASM_PIN_FILTER_BITS / 8];
+    uint8_t  i2c_addr_bits[16];  //allowed 7-bit I2C addresses (when restricted)
+} eccles_wasm_privilege_t;
+
+//build a policy (value type - nothing is applied until you set it)
+void eccles_wasm_privilege_init(eccles_wasm_privilege_t *p, uint32_t perms);  //perms only: any pin, any bus, any address
+eccles_wasm_status_t eccles_wasm_privilege_allow_pin(eccles_wasm_privilege_t *p, uint32_t pin);  //first call switches pins to allow-list mode
+eccles_wasm_status_t eccles_wasm_privilege_allow_pin_range(eccles_wasm_privilege_t *p, uint32_t lo, uint32_t hi);
+eccles_wasm_status_t eccles_wasm_privilege_allow_bus(eccles_wasm_privilege_t *p, eccles_wasm_bus_t kind, uint32_t id);
+eccles_wasm_status_t eccles_wasm_privilege_allow_i2c_addr(eccles_wasm_privilege_t *p, uint32_t lo, uint32_t hi);
+
+//default instance
+eccles_wasm_status_t eccles_wasm_set_privilege(const eccles_wasm_privilege_t *p);
+eccles_wasm_status_t eccles_wasm_set_hal_privilege(uint32_t perms);  //e.g. ECCLES_WASM_ALLOW_ALL
+#define eccles_wasm_set_hal_priviledge eccles_wasm_set_hal_privilege  //spelling alias
+uint32_t    eccles_wasm_denied_count(void);  //refused guest calls so far
+const char *eccles_wasm_last_denied(void);  //name of the last refused import, or ""
 
 //host functions (your own imports) + guest memory access
 
@@ -391,7 +473,8 @@ uint32_t eccles_wasm_mem_size(void);  //physically backed bytes
 //every instance has its own arena, stacks, memory, host function table and error state, nothing is shared
 //so different instances can run in parallel on different tasks, but one instance must only be driven by one task at a time
 //the chip itself IS shared, use ECCLES_WASM_HW_LOCK() / ECCLES_WASM_HW_UNLOCK() around pin and bus access (see eccles_wasm_config.h)
-//the instance struct lives at the start of the memory you pass in so there is no seperate allocation (costs about 1.2 KB of the arena)
+//with ECCLES_WASM_THREADSAFE the host build does it with a pthread mutex
+//the instance struct lives at the start of the memory you pass in so there is no separate allocation (costs about 1.2 KB of the arena)
 eccles_wasm_vm_t *eccles_wasm_vm_create(void *mem, size_t size);  //NULL if too small
 #if ECCLES_WASM_USE_HEAP
 eccles_wasm_vm_t *eccles_wasm_vm_create_heap(size_t size);  //malloc()s the arena
@@ -419,13 +502,34 @@ eccles_wasm_status_t eccles_wasm_vm_register(eccles_wasm_vm_t *vm, const char *n
 void     eccles_wasm_vm_unregister_all(eccles_wasm_vm_t *vm);
 //value for an IMPORTED global (e.g. "__memory_base", "__stack_pointer"); set before loading. Unset imports start at 0.
 eccles_wasm_status_t eccles_wasm_vm_set_global(eccles_wasm_vm_t *vm, const char *name, uint64_t value);
+eccles_wasm_status_t eccles_wasm_vm_set_privilege(eccles_wasm_vm_t *vm, const eccles_wasm_privilege_t *p);
+eccles_wasm_status_t eccles_wasm_vm_set_hal_privilege(eccles_wasm_vm_t *vm, uint32_t perms);
+void     eccles_wasm_vm_get_privilege(const eccles_wasm_vm_t *vm, eccles_wasm_privilege_t *out);
+uint32_t eccles_wasm_vm_denied_count(const eccles_wasm_vm_t *vm);
+const char *eccles_wasm_vm_last_denied(const eccles_wasm_vm_t *vm);
+typedef void (*eccles_wasm_denied_fn)(eccles_wasm_vm_t *vm, const char *import_name);
+void     eccles_wasm_vm_set_denied_hook(eccles_wasm_vm_t *vm, eccles_wasm_denied_fn hook);  //audit: called for every refused call
+#if ECCLES_WASM_THREADS
+//wasm threads (wasi-threads model): several instances run ONE module over one shared memory
+//the module imports "thread-spawn"(start_arg) -> tid and exports "wasi_thread_start"(tid, start_arg), this is what clang/rustc emit for wasm32-wasi-threads
+//this runtime does not create threads (that is the job of your rtos), you install a spawner with eccles_wasm_vm_set_thread_spawner()
+//the spawner makes a sibling with eccles_wasm_vm_spawn() and starts a task that runs eccles_wasm_vm_thread_start(), then eccles_wasm_vm_destroy()
+//a module may only spawn when it was granted ECCLES_WASM_PERM_THREADS
+//siblings share the code, the passive segment bytes and the linear memory (it must be declared shared), each one has its own value stack,
+//globals and tables which are restored to their post-instantiation values. the parent must outlive its children
+//and siblings inherit the privilege of the parent at spawn time
+typedef int32_t (*eccles_wasm_thread_spawn_fn)(eccles_wasm_vm_t *parent, uint32_t start_arg, void *ctx);
+void eccles_wasm_vm_set_thread_spawner(eccles_wasm_vm_t *vm, eccles_wasm_thread_spawn_fn fn, void *ctx);
+eccles_wasm_vm_t *eccles_wasm_vm_spawn(eccles_wasm_vm_t *parent, void *mem, size_t size);  //NULL on failure
+eccles_wasm_status_t eccles_wasm_vm_thread_start(eccles_wasm_vm_t *child, int32_t tid, uint32_t start_arg);
+#endif
 uint8_t *eccles_wasm_vm_mem(eccles_wasm_vm_t *vm, uint32_t addr, uint32_t len);
 uint32_t eccles_wasm_vm_mem_size(const eccles_wasm_vm_t *vm);
 
 //hardware operations - the "backend". Same names a guest imports.
 //every function: SUCCESSFUL / FAILED / UNSUPPORTED.
 
-//---- GPIO ----
+//GPIO
 eccles_wasm_status_t eccles_wasm_enable(uint32_t pin);  //make it an output and drive it HIGH
 eccles_wasm_status_t eccles_wasm_disable(uint32_t pin);  //make it an output and drive it LOW
 eccles_wasm_status_t eccles_wasm_toggle(uint32_t pin);
@@ -433,13 +537,13 @@ eccles_wasm_status_t eccles_wasm_mode(uint32_t pin, uint32_t mode);  //eccles_wa
 eccles_wasm_status_t eccles_wasm_write(uint32_t pin, uint32_t level);  //0 / non-zero
 eccles_wasm_status_t eccles_wasm_read(uint32_t pin, uint32_t *level);
 
-//---- analog ----
+//analog
 eccles_wasm_status_t eccles_wasm_analog(uint32_t pin, uint32_t value);  //PWM duty 0..ECCLES_WASM_ANALOG_MAX
 eccles_wasm_status_t eccles_wasm_pwm(uint32_t pin, uint32_t freq_hz, uint32_t duty16);  //duty 0..65535
 eccles_wasm_status_t eccles_wasm_adc(uint32_t pin, uint32_t *value);  //raw ADC reading
 eccles_wasm_status_t eccles_wasm_dac(uint32_t pin, uint32_t value);
 
-//---- time / power ----
+//time / power
 eccles_wasm_status_t eccles_wasm_sleep(uint32_t ms);
 eccles_wasm_status_t eccles_wasm_sleep_us(uint32_t us);
 eccles_wasm_status_t eccles_wasm_millis(uint32_t *ms);  //wraps at 2^32
@@ -451,13 +555,13 @@ eccles_wasm_status_t eccles_wasm_wdt_feed(void);
 eccles_wasm_status_t eccles_wasm_random(uint32_t *value);  //hardware RNG only
 eccles_wasm_status_t eccles_wasm_log(const uint8_t *buf, uint32_t len);  //console output
 
-//---- pin interrupts (edge counters; the guest polls - nothing runs in ISR context) ----
+//pin interrupts (edge counters; the guest polls - nothing runs in ISR context)
 eccles_wasm_status_t eccles_wasm_irq_attach(uint32_t pin, uint32_t edge);  //eccles_wasm_edge_t
 eccles_wasm_status_t eccles_wasm_irq_count(uint32_t pin, uint32_t *count);
 eccles_wasm_status_t eccles_wasm_irq_clear(uint32_t pin);
 eccles_wasm_status_t eccles_wasm_irq_detach(uint32_t pin);
 
-//---- buses (pin args of -1 = the board's default) ----
+//buses (pin args of -1 = the board's default)
 eccles_wasm_status_t eccles_wasm_uart_begin(uint32_t port, uint32_t baud, int32_t tx_pin, int32_t rx_pin);
 eccles_wasm_status_t eccles_wasm_uart_write(uint32_t port, const uint8_t *buf, uint32_t len);
 eccles_wasm_status_t eccles_wasm_uart_read(uint32_t port, uint8_t *buf, uint32_t len, uint32_t timeout_ms, uint32_t *got);
@@ -472,7 +576,7 @@ eccles_wasm_status_t eccles_wasm_spi_begin(uint32_t bus, int32_t sck_pin, int32_
 eccles_wasm_status_t eccles_wasm_spi_transfer(uint32_t bus, const uint8_t *tx, uint8_t *rx, uint32_t len);  //tx or rx may be NULL
 eccles_wasm_status_t eccles_wasm_spi_end(uint32_t bus);
 
-//---- plug in / replace backend operations at run time ----
+//plug in / replace backend operations at run time
 typedef struct eccles_wasm_hal_s {
     eccles_wasm_status_t (*gpio_mode)(uint32_t pin, uint32_t mode);
     eccles_wasm_status_t (*gpio_write)(uint32_t pin, uint32_t level);
@@ -513,14 +617,13 @@ typedef struct eccles_wasm_hal_s {
 void eccles_wasm_hal_override(const eccles_wasm_hal_t *ops);
 void eccles_wasm_hal_reset(void);
 
-//---- filesystem hook: use ANY file system for eccles_wasm_load(path) ----
+//filesystem hook: use ANY file system for eccles_wasm_load(path)
 typedef void *(*eccles_wasm_fs_open_fn)(const char *path);  //NULL on failure
 typedef int   (*eccles_wasm_fs_read_fn)(void *file, uint8_t *buf, size_t max);  //bytes, 0 = EOF, <0 error
 typedef void  (*eccles_wasm_fs_close_fn)(void *file);
 void eccles_wasm_set_fs(eccles_wasm_fs_open_fn open, eccles_wasm_fs_read_fn read, eccles_wasm_fs_close_fn close);
 
-//---- host-build simulator (ECCLES_WASM_PLATFORM == HOST): drive and inspect the
-//fake hardware from tests / a desktop app ----------------------------
+//host build simulator (ECCLES_WASM_PLATFORM == HOST), drive and inspect the fake hardware from tests or a desktop app
 #if ECCLES_WASM_PLATFORM == ECCLES_WASM_PLAT_HOST
 void     eccles_wasm_sim_reset(void);  //all pins/buses back to power-on
 uint32_t eccles_wasm_sim_pin_mode(uint32_t pin);

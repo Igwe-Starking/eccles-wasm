@@ -2,7 +2,8 @@
 //!
 //! Call the host chip's hardware from Rust compiled to `wasm32-unknown-unknown`.
 //! Every call returns [`Result`]: `Ok` for SUCCESSFUL, [`Error::Failed`] when the chip tried and
-//! failed, [`Error::Unsupported`] when this chip/backend cannot do it at all.
+//! failed, [`Error::Unsupported`] when this chip/backend cannot do it at all, [`Error::Denied`] when the
+//! host has not granted this module that hardware.
 //!
 //! ```ignore
 //! #![no_std]
@@ -70,6 +71,8 @@ pub enum Error {
     Failed,
     /// This chip / backend cannot do that at all.
     Unsupported,
+    /// The host did not grant this module permission to use that hardware (see the host's privilege policy).
+    Denied,
 }
 pub type Result<T> = core::result::Result<T, Error>;
 
@@ -78,6 +81,7 @@ fn check(status: i32) -> Result<()> {
     match status {
         0 => Ok(()),
         2 => Err(Error::Unsupported),
+        3 => Err(Error::Denied),
         _ => Err(Error::Failed),
     }
 }

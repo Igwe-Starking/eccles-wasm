@@ -169,7 +169,11 @@ Put `app.wasm` on the board's filesystem, then `eccles_wasm_load("/path/app.wasm
 
 ## 4. Run it
 
+> **Grant hardware first.** Since 2.0 a module can use no hardware until you allow it. Call `eccles_wasm_set_hal_privilege(ECCLES_WASM_ALLOW_PIN_ALL | ECCLES_WASM_ALLOW_SAFE);` before running, or every pin call returns `DENIED` (3). See [Permissions](../wiki/Permissions.md).
+
 The pattern is always the same: load, `setup`, then `loop` forever.
+
+Prefer a single entry point? Export `main`, loop inside it (with `ew_sleep`), and call `eccles_wasm_run("main")` once. Leave fuel at 0 for a `main` that never returns. See [Two ways to structure a module](../wiki/Concepts.md).
 
 ### Arduino
 
@@ -298,7 +302,14 @@ Still stuck? Open an [issue](https://github.com/igwe-starking/eccles-wasm/issues
 
 ---
 
+## Threads
+
+A module that starts its own threads needs `ECCLES_WASM_ATOMICS` and `ECCLES_WASM_THREADS`, the `ECCLES_WASM_PERM_THREADS` permission, and a spawner function that starts an RTOS task. See [Threads and Spawner](../wiki/Threads-and-Spawner.md).
+
 ## Where to next
+
+The full documentation is the wiki: [`wiki/Home.md`](../wiki/Home.md), or [`ECCLES_WASM_WIKI.txt`](../ECCLES_WASM_WIKI.txt) as one file.
+
 
 - [RUNTIME_API.md](RUNTIME_API.md): every hardware import, plus the C, C++ and Rust guest SDKs
 - [DESIGN.md](DESIGN.md): how the loader, translator and interpreter work

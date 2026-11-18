@@ -24,6 +24,7 @@ static void *worker(void *arg) {
     eccles_wasm_vm_t *vm = eccles_wasm_vm_create_heap(300 * 1024);
     eccles_wasm_vm_t *vm2 = eccles_wasm_vm_create_heap(300 * 1024);          /* two instances per thread */
     if (!vm || !vm2) { g_fail[t]++; return NULL; }
+    eccles_wasm_vm_set_hal_privilege(vm2, ECCLES_WASM_ALLOW_ALL);
     eccles_wasm_vm_set_user(vm, (void *)(uintptr_t)(1000 * (t + 1)));
     eccles_wasm_vm_register(vm, "add3", add3_tag, "i(iii)");
     eccles_wasm_vm_register(vm, "boom", boom, "v()");

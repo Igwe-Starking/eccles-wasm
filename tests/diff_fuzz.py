@@ -507,6 +507,46 @@ def part_c(rng, n):
         cases.append(Case("cfg#%d" % k, m, {"f": export_sig([I32, I32], [I32])}, calls))
     return cases
 
+
+def part_atomics():
+    """threads proposal, single-threaded semantics (every atomic op, all widths) - needs an ECCLES_WASM_ATOMICS=1 binary"""
+    m = Module(); m.mem = (1, 1); m.mem_shared = True
+    m.data.append((0, bytes((i * 37 + 11) & 0xFF for i in range(64))))
+    asz = [4, 8, 1, 2, 1, 2, 4]; lg = {1: 0, 2: 1, 4: 2, 8: 3}
+    vt = lambda k: I64 if k in (1, 4, 5, 6) else I32
+    sg = {}; calls = []; rng = random.Random(23)
+    addrs = [0, 1, 2, 3, 4, 7, 8, 12, 16, 24, 33, 40, 63, 64, 65532, 65535, 65536, 0xFFFFFFFF]
+    def val(t):
+        return rng.choice(I32_EDGE) if t == I32 else rng.choice(I64_EDGE)
+    for k in range(7):                                      # loads
+        nm = "ld%d" % k; m.func([I32], [vt(k)], [], lget(0) + atomic(0x10 + k, lg[asz[k]]), export=nm); sg[nm] = export_sig([I32], [vt(k)])
+        calls += [(nm, [a]) for a in addrs]
+    for k in range(7):                                      # stores
+        nm = "st%d" % k; m.func([I32, vt(k)], [], [], lget(0) + lget(1) + atomic(0x17 + k, lg[asz[k]]), export=nm); sg[nm] = export_sig([I32, vt(k)], [])
+        for a in addrs[:12]:
+            calls += [(nm, [a, val(vt(k))]), ("ld%d" % k, [a])]
+    names = ["add", "sub", "and", "or", "xor", "xchg"]
+    for o in range(6):                                      # read-modify-write
+        for k in range(7):
+            nm = "rmw_%s%d" % (names[o], k)
+            m.func([I32, vt(k)], [vt(k)], [], lget(0) + lget(1) + atomic(0x1E + o * 7 + k, lg[asz[k]]), export=nm); sg[nm] = export_sig([I32, vt(k)], [vt(k)])
+            for a in addrs[:13]:
+                calls += [(nm, [a, val(vt(k))]), ("ld%d" % k, [a])]
+    for k in range(7):                                      # cmpxchg (both the matching and non-matching case)
+        nm = "cx%d" % k
+        m.func([I32, vt(k), vt(k)], [vt(k)], [], lget(0) + lget(1) + lget(2) + atomic(0x48 + k, lg[asz[k]]), export=nm); sg[nm] = export_sig([I32, vt(k), vt(k)], [vt(k)])
+        for a in addrs[:10]:
+            calls += [("ld%d" % k, [a])]
+            calls += [(nm, [a, val(vt(k)), val(vt(k))]), ("ld%d" % k, [a])]
+    m.func([], [], [], ATOMIC_FENCE, export="fence"); sg["fence"] = export_sig([], [])
+    m.func([I32, I32], [I32], [], lget(0) + lget(1) + atomic(0x00, 2), export="notify"); sg["notify"] = export_sig([I32, I32], [I32])
+    m.func([I32, I32, I64], [I32], [], lget(0) + lget(1) + lget(2) + atomic(0x01, 2), export="wait32"); sg["wait32"] = export_sig([I32, I32, I64], [I32])
+    m.func([I32, I64, I64], [I32], [], lget(0) + lget(1) + lget(2) + atomic(0x02, 3), export="wait64"); sg["wait64"] = export_sig([I32, I64, I64], [I32])
+    calls += [("fence", []), ("notify", [8, 1]), ("notify", [3, 1]), ("notify", [65536, 0]), ("notify", [0, 0xFFFFFFFF]),
+              ("st0", [8, 5]), ("wait32", [8, 4, 0]), ("wait32", [8, 5, 0]), ("wait32", [8, 5, 1000]), ("wait32", [9, 5, 0]), ("wait32", [65536, 0, 0]),
+              ("st1", [16, 7]), ("wait64", [16, 8, 0]), ("wait64", [16, 7, 0]), ("wait64", [16, 7, 1000]), ("wait64", [20, 7, 0])]
+    return [Case("atomics (single-threaded semantics)", m, sg, calls)]
+
 # ---------------------------------------------------------------- driver
 def run(cases, keep, binary):
     tmp = tempfile.mkdtemp(prefix="ew_fuzz_")
@@ -559,11 +599,12 @@ if __name__ == "__main__":
     ap.add_argument("--random-modules", type=int, default=300)
     ap.add_argument("--keep", action="store_true")
     ap.add_argument("--cf-modules", type=int, default=400)
+    ap.add_argument("--atomics", action="store_true", help="also test the atomic instructions (binary must be built with -DECCLES_WASM_ATOMICS=1)")
     ap.add_argument("--subtrees", action="store_true", help="also export every sub-expression to localise a mismatch")
     ap.add_argument("--binary", default=os.path.join(ROOT, "build", "wsrun"))
     a = ap.parse_args()
     rng = random.Random(a.seed)
-    cases = part_a() + part_b(rng, a.random_modules, a.subtrees) + part_c(rng, a.cf_modules)
+    cases = part_a() + part_b(rng, a.random_modules, a.subtrees) + part_c(rng, a.cf_modules) + (part_atomics() if a.atomics else [])
     fails, checked, traps = run(cases, a.keep, a.binary)
     print("%d modules, %d calls compared (%d reference traps), %d mismatches" % (len(cases), checked, traps, fails))
     sys.exit(1 if fails else 0)

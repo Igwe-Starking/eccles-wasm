@@ -4,6 +4,9 @@
 #include "esp_log.h"
 
 void app_main(void) {
+    /* v2: modules get NO hardware until you grant it. Blink needs pins + sleep + console. */
+    eccles_wasm_set_hal_privilege(ECCLES_WASM_ALLOW_PIN_ALL | ECCLES_WASM_ALLOW_SAFE);
+
     /* A) from a C array in flash (nothing is copied; translated code lives in the arena) */
     eccles_wasm_status_t st = eccles_wasm_load_buffer(blink_wasm, sizeof blink_wasm);
 

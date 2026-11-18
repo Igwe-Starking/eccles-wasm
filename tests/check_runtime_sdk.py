@@ -9,6 +9,10 @@ for m in re.finditer(r'\{"(\w+)",\s*(?:hw|wasi)_\w+,\s*"([ivIfF])\(([iIfF]*)\)"\
     rt[m.group(1)] = len(m.group(3))
 hw = {k: v for k, v in rt.items() if k not in ("fd_write", "proc_exit", "args_sizes_get", "environ_sizes_get", "args_get", "environ_get", "clock_time_get", "random_get", "sched_yield")}
 bad = 0
+# the import name spaces must stay disjoint (matching is by field name only): hardware, WASI and thread-spawn
+names = re.findall(r'\{"([\w-]+)",\s*(?:hw|wasi)_\w+,\s*"[ivIfF]\([iIfF]*\)"\}', src) + ["thread-spawn"]
+dups = sorted({n for n in names if names.count(n) > 1})
+if dups: print("duplicate import names across the builtin tables:", dups); bad += 1
 def compare(label, found):
     global bad
     for n, a in sorted(found.items()):

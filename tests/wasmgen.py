@@ -76,6 +76,7 @@ class Module:
     def __init__(self):
         self.types, self.imports, self.funcs, self.exports = [], [], [], []
         self.mem = None            # (min, max|None)
+        self.mem_shared = False    # shared memory (needs a maximum)
         self.globals, self.data, self.elems = [], [], []
         self.table = None
         self.start = None
@@ -118,7 +119,11 @@ class Module:
             out += section(4, vec([b"\x70\x00" + uleb(self.table)]))
         if self.mem is not None:
             mn, mx = self.mem
-            out += section(5, vec([(b"\x00" + uleb(mn)) if mx is None else (b"\x01" + uleb(mn) + uleb(mx))]))
+            if self.mem_shared:
+                lim = b"\x03" + uleb(mn) + uleb(mx)
+            else:
+                lim = (b"\x00" + uleb(mn)) if mx is None else (b"\x01" + uleb(mn) + uleb(mx))
+            out += section(5, vec([lim]))
         if self.globals:
             out += section(6, vec([bytes([t, m]) + init + b"\x0b" for t, m, init in self.globals]))
         if self.exports:
@@ -165,3 +170,6 @@ def return_call(f): return b"\x12" + uleb(f)
 def return_call_indirect(ty, tab=0): return b"\x13" + uleb(ty) + uleb(tab)
 def call_indirect_t(ty, tab): return b"\x11" + uleb(ty) + uleb(tab)
 def limits(mn, mx=None): return (b"\x00" + uleb(mn)) if mx is None else (b"\x01" + uleb(mn) + uleb(mx))
+
+def atomic(sub, align, off=0): return b"\xfe" + uleb(sub) + uleb(align) + uleb(off)
+ATOMIC_FENCE = b"\xfe\x03\x00"

@@ -19,6 +19,8 @@ int main(int argc, char **argv) {
     const char *path = argc > 1 ? argv[1] : "examples/blink.wasm";
     eccles_wasm_vm_t *a = eccles_wasm_vm_create(arena_a, sizeof arena_a), *b = eccles_wasm_vm_create(arena_b, sizeof arena_b);
     pthread_t ta, tb;
+    eccles_wasm_vm_set_hal_privilege(a, ECCLES_WASM_ALLOW_PIN_ALL | ECCLES_WASM_PERM_TIME);
+    eccles_wasm_vm_set_hal_privilege(b, ECCLES_WASM_ALLOW_READ_ONLY | ECCLES_WASM_PERM_TIME);     /* b may only look: its blinking is refused */
     eccles_wasm_vm_set_user(a, (void *)"left"); eccles_wasm_vm_set_user(b, (void *)"right");
     eccles_wasm_vm_register(a, "unused", tagged_log, "v(i)"); eccles_wasm_vm_register(b, "unused", tagged_log, "v(i)");
     if (eccles_wasm_vm_load(a, path) || eccles_wasm_vm_load(b, path)) { puts("load failed"); return 1; }

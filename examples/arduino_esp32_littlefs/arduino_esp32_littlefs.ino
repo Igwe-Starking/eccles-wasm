@@ -6,6 +6,7 @@
 void setup() {
   Serial.begin(115200);
   LittleFS.begin(true);
+  eccles_wasm_set_hal_privilege(ECCLES_WASM_ALLOW_PIN_ALL | ECCLES_WASM_ALLOW_SAFE | ECCLES_WASM_PERM_I2C);   // v2: grant what the module may use
   eccles_wasm_use_serial(Serial);          // guest log() / printf output -> Serial
   eccles_wasm_use_wire(Wire);              // guest i2c_* -> Wire (bus 0)
 

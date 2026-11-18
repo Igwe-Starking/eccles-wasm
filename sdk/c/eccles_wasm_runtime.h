@@ -1,29 +1,22 @@
-//eccles_wasm_runtime.h the sdk header for the guest side (the code that runs INSIDE wasm)
-//NOTE: when you add or rename an import here you must change the import table in eccles_wasm.c too, else make sdk-check fails
-//TODO: write a Uart wrapper for the c++ part, i only did Pin, I2c and Spi so far
 
-/* eccles_wasm_runtime.h - the ECCLES WASM runtime SDK for C/C++: write code that runs on any chip hosting ECCLES WASM.
- * ------------------------------------------------------------------------------------------
- *   clang --target=wasm32 -O2 -nostdlib -ffreestanding -Wl,--no-entry -Wl,-z,stack-size=4096 \
- *         -Wl,--initial-memory=65536 -Wl,--max-memory=65536 -o app.wasm app.c
- *
- *   #include "eccles_wasm_runtime.h"
- *   EW_EXPORT("setup") void setup(void) { ew_pin_mode(2, EW_OUTPUT); ew_println("hello from wasm"); }
- *   EW_EXPORT("loop")  void loop(void)  { ew_toggle(2); ew_sleep(500); }
- *
- * Copy app.wasm to the chip's filesystem; the host does eccles_wasm_load("/app.wasm") and calls
- * setup() once and loop() forever (or whatever exports you define).
- *
- * Every hardware call returns an int status: EW_OK (0), EW_FAILED (1) or EW_UNSUPPORTED (2) - the
- * chip tells you what it can't do instead of crashing. Values are returned through pointers.
- * Pin numbers are the host platform's own (Arduino pin, GPIO number, STM32 port*16+bit ...).
- *
- * Needs no libc: the tiny ew_printf() below covers %d %u %x %X %c %s %p %% with width/zero-pad.
- * Optional: #define EW_ARDUINO_COMPAT before including for pinMode/digitalWrite/delay/millis/... names.
- *
- * The import names and arities in this header are checked against the runtime's import table by
- * `make sdk-check`, and ew_printf/ew_print_* are unit-tested natively.
- */
+//eccles_wasm_runtime.h the sdk header for the guest side (the code that runs INSIDE wasm)
+//build it with clang: clang --target=wasm32 -O2 -nostdlib -ffreestanding -Wl,--no-entry -Wl,-z,stack-size=4096
+//-Wl,--initial-memory=65536 -Wl,--max-memory=65536 -o app.wasm app.c
+//mark your functions with EW_EXPORT("setup") and EW_EXPORT("loop"), copy app.wasm to the filesystem of the chip
+//the host does eccles_wasm_load("/app.wasm") and calls setup() once and loop() forever (or whatever exports you define)
+//or export a single EW_EXPORT("main"), loop inside it with ew_sleep, and call eccles_wasm_run("main") once (it blocks)
+//
+//every hardware call returns an int status: EW_OK (0), EW_FAILED (1), EW_UNSUPPORTED (2) or EW_DENIED (3)
+//so the chip (or the privilege policy of the host) tells you what you may not do instead of crashing
+//the host decides per module which hardware it may touch, so check for EW_DENIED and degrade gracefully
+//values are returned through pointers. pin numbers are the ones of the host platform (arduino pin, gpio number, stm32 port*16+bit)
+//
+//no libc needed, the tiny ew_printf() covers %d %u %x %X %c %s %p %% with width and zero pad
+//#define EW_ARDUINO_COMPAT before including to get the pinMode / digitalWrite / delay / millis names
+//the import names and arities in this header are checked against the runtime import table by `make sdk-check`
+//and ew_printf / ew_print_* are unit tested natively
+//NOTE: when you add or rename an import here you must change the import table in eccles_wasm.c too, else make sdk-check fails
+//TODO: add a Uart wrapper to the C++ part (Pin, I2c and Spi are done)
 //include guard
 #ifndef ECCLES_WASM_RUNTIME_H
 #define ECCLES_WASM_RUNTIME_H
@@ -39,7 +32,7 @@ extern "C" {
 
 //EW_NATIVE_TEST is only used by tests/test_runtime_sdk.c so the helpers can run on my pc
 //the wasm attributes dont exist there
-#if defined(EW_NATIVE_TEST)               /* host-side unit test of the pure helpers */
+#if defined(EW_NATIVE_TEST)  //host-side unit test of the pure helpers
   #define EW_IMPORT(n)
   #define EW_EXPORT(n)
 #else
@@ -48,26 +41,26 @@ extern "C" {
 #endif
 
 //same 3 numbers as SUCCESSFUL / FAILED / UNSUPPORTED in the runtime, dont change them
-enum { EW_OK = 0, EW_FAILED = 1, EW_UNSUPPORTED = 2 };
+enum { EW_OK = 0, EW_FAILED = 1, EW_UNSUPPORTED = 2, EW_DENIED = 3 };  //DENIED: the host did not grant this module that hardware
 //pin modes, must match the host side (ECCLES_WASM_PIN_*)
 enum { EW_INPUT = 0, EW_OUTPUT = 1, EW_INPUT_PULLUP = 2, EW_INPUT_PULLDOWN = 3, EW_OPEN_DRAIN = 4 };
 //edges are bit flags, CHANGE is both of them
 enum { EW_RISING = 1, EW_FALLING = 2, EW_CHANGE = 3 };
 
-/* ---- GPIO ---- */
-EW_IMPORT("enable")   int ew_enable(int pin);                 /* output, HIGH */
-EW_IMPORT("disable")  int ew_disable(int pin);                /* output, LOW  */
+//GPIO
+EW_IMPORT("enable")   int ew_enable(int pin);  //output, HIGH
+EW_IMPORT("disable")  int ew_disable(int pin);  //output, LOW
 EW_IMPORT("toggle")   int ew_toggle(int pin);
 EW_IMPORT("mode")     int ew_pin_mode(int pin, int mode);
 EW_IMPORT("write")    int ew_write(int pin, int level);
 EW_IMPORT("read")     int ew_read(int pin, uint32_t *level);
-/* ---- analog ---- */
-EW_IMPORT("analog")   int ew_analog(int pin, int value);      /* PWM duty 0..255 */
+//analog
+EW_IMPORT("analog")   int ew_analog(int pin, int value);  //PWM duty 0..255
 //duty16 is 0..65535 but ew_analog is only 0..255, i mixed them up once and my led was always on
 EW_IMPORT("pwm")      int ew_pwm(int pin, int freq_hz, int duty16);
 EW_IMPORT("adc")      int ew_adc(int pin, uint32_t *value);
 EW_IMPORT("dac")      int ew_dac(int pin, int value);
-/* ---- time / power ---- */
+//time / power
 EW_IMPORT("sleep")    int ew_sleep(int ms);
 EW_IMPORT("sleep_us") int ew_sleep_us(int us);
 EW_IMPORT("millis")   int ew_millis_(uint32_t *ms);
@@ -79,15 +72,15 @@ EW_IMPORT("reset")    int ew_reset(void);
 EW_IMPORT("wdt_feed") int ew_wdt_feed(void);
 EW_IMPORT("random")   int ew_random_(uint32_t *value);
 EW_IMPORT("log")      int ew_log(const char *buf, int len);
-/* ---- pin interrupts (edge counters you poll) ---- */
+//pin interrupts (edge counters you poll)
 EW_IMPORT("irq_attach") int ew_irq_attach(int pin, int edge);
 EW_IMPORT("irq_count")  int ew_irq_count(int pin, uint32_t *count);
 EW_IMPORT("irq_clear")  int ew_irq_clear(int pin);
 EW_IMPORT("irq_detach") int ew_irq_detach(int pin);
-/* ---- buses ---- */
+//buses
 EW_IMPORT("uart_begin") int ew_uart_begin(int port, int baud, int tx_pin, int rx_pin);
 EW_IMPORT("uart_write") int ew_uart_write(int port, const void *buf, int len);
-//got = how many bytes we really recieved
+//got = how many bytes we really received
 EW_IMPORT("uart_read")  int ew_uart_read(int port, void *buf, int len, int timeout_ms, uint32_t *got);
 EW_IMPORT("uart_end")   int ew_uart_end(int port);
 EW_IMPORT("i2c_begin")  int ew_i2c_begin(int bus, int sda_pin, int scl_pin, int freq_hz);
@@ -95,10 +88,10 @@ EW_IMPORT("i2c_write")  int ew_i2c_write(int bus, int addr7, const void *buf, in
 EW_IMPORT("i2c_read")   int ew_i2c_read(int bus, int addr7, void *buf, int len);
 EW_IMPORT("i2c_write_read") int ew_i2c_write_read(int bus, int addr7, const void *tx, int txlen, void *rx, int rxlen);
 EW_IMPORT("spi_begin")  int ew_spi_begin(int bus, int sck_pin, int mosi_pin, int miso_pin, int freq_hz, int mode);
-EW_IMPORT("spi_transfer") int ew_spi_transfer(int bus, const void *tx, void *rx, int len);   /* tx or rx may be 0 */
+EW_IMPORT("spi_transfer") int ew_spi_transfer(int bus, const void *tx, void *rx, int len);  //tx or rx may be 0
 EW_IMPORT("spi_end")    int ew_spi_end(int bus);
 
-/* ---- conveniences ---- */
+//conveniences
 //the ones with an underscore at the end return the status and give the value thru a pointer
 //these are the easy versions, they just ignore the status
 static inline uint32_t ew_millis(void) { uint32_t v = 0; ew_millis_(&v); return v; }
@@ -107,9 +100,9 @@ static inline uint32_t ew_random(void) { uint32_t v = 0; ew_random_(&v); return 
 static inline int ew_digital_read(int pin) { uint32_t v = 0; ew_read(pin, &v); return (int)v; }
 static inline int ew_analog_read(int pin)  { uint32_t v = 0; ew_adc(pin, &v); return (int)v; }
 //handy when you want to print the result of a call
-static inline const char *ew_status_name(int s) { return s == EW_OK ? "ok" : s == EW_FAILED ? "failed" : s == EW_UNSUPPORTED ? "unsupported" : "?"; }
+static inline const char *ew_status_name(int s) { return s == EW_OK ? "ok" : s == EW_FAILED ? "failed" : s == EW_UNSUPPORTED ? "unsupported" : s == EW_DENIED ? "denied" : "?"; }
 
-/* ---- console ---- */
+//console
 //no strlen here because we have no libc, we count by hand
 static inline int ew_print(const char *s) { int n = 0; while (s[n]) n++; return ew_log(s, n); }
 static inline int ew_println(const char *s) { int r = ew_print(s); ew_log("\n", 1); return r; }
@@ -124,8 +117,8 @@ static inline void ew__fmt_uint(char *out, int *n, uint64_t v, unsigned base, in
     for (i = t - 1; i >= 0; i--) out[(*n)++] = tmp[i];
 }
 //no %f on purpose, nobody needs floats on a 20kb chip and soft float is huge
-//TODO: maybe add %f one day
-/* Minimal printf: %d %i %u %x %X %c %s %p %% (+ l/ll/z length modifiers, width, 0-padding; '-' is parsed but not applied). Returns chars written. */
+//TODO: add %f support
+//minimal printf: %d %i %u %x %X %c %s %p %% (+ l/ll/z length modifiers, width, 0-padding; '-' is parsed but not applied). Returns chars written.
 static inline int ew_vprintf(const char *fmt, va_list ap) {
     char line[96]; int n = 0, total = 0; //96 bytes on the wasm stack, the stack is only 4096 so dont make this bigger
 #define EW__FLUSH() do { if (n) { ew_log(line, n); total += n; n = 0; } } while (0)
@@ -134,7 +127,7 @@ static inline int ew_vprintf(const char *fmt, va_list ap) {
         if (*fmt != '%') { line[n++] = *fmt; continue; }
         fmt++;
         { int width = 0, lng = 0; char pad = ' ';
-          while (*fmt == '-') fmt++;                      /* left-justify is accepted but not applied */
+          while (*fmt == '-') fmt++;  //left-justify is accepted but not applied
           if (*fmt == '0') { pad = '0'; fmt++; }
           while (*fmt >= '0' && *fmt <= '9') { width = width * 10 + (*fmt - '0'); fmt++; }
           while (*fmt == 'l' || *fmt == 'z') { lng++; fmt++; }
@@ -159,7 +152,7 @@ static inline int ew_vprintf(const char *fmt, va_list ap) {
 //wrapper around ew_vprintf, thats all
 static inline int ew_printf(const char *fmt, ...) { va_list ap; int r; va_start(ap, fmt); r = ew_vprintf(fmt, ap); va_end(ap); return r; }
 
-/* ---- Arduino-style names (opt-in) ---- */
+//Arduino-style names (opt-in)
 //only turn this on when you really need the arduino names. HIGH / LOW / INPUT are very common macro names
 //and they will clash with other headers
 #ifdef EW_ARDUINO_COMPAT
@@ -181,10 +174,10 @@ static inline int ew_printf(const char *fmt, ...) { va_list ap; int r; va_start(
 #endif
 
 #ifdef __cplusplus
-}   /* extern "C" */
+}  //extern "C"
 
 //NOTE: all of these are inline so they cost nothing when you dont use them
-namespace ew {                          /* thin C++ wrappers - no exceptions, no RTTI, no heap */
+namespace ew {  //thin C++ wrappers - no exceptions, no RTTI, no heap
     struct Pin {
         int n;
         explicit Pin(int pin) : n(pin) {}
@@ -219,4 +212,4 @@ namespace ew {                          /* thin C++ wrappers - no exceptions, no
 }
 #endif
 
-#endif /* ECCLES_WASM_RUNTIME_H */
+#endif  //ECCLES_WASM_RUNTIME_H

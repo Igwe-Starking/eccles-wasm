@@ -1,0 +1,222 @@
+ets Jul 29 2019 12:21:46
+
+rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)
+configsip: 0, SPIWP:0xee
+clk_drv:0x00,q_drv:0x00,d_drv:0x00,cs0_drv:0x00,hd_drv:0x00,wp_drv:0x00
+mode:DIO, clock div:2
+load:0x3fff0030,len:7076
+load:0x40078000,len:15584
+ho 0 tail 12 room 4
+load:0x40080400,len:4
+load:0x40080404,len:3876
+entry 0x4008064c
+␛[0;32mI (31) boot: ESP-IDF 5.1.2 2nd stage bootloader␛[0m
+␛[0;32mI (31) boot: compile time Nov 14 2026 08:36:52␛[0m
+␛[0;32mI (31) boot: Multicore bootloader␛[0m
+␛[0;32mI (35) boot: chip revision: v3.1␛[0m
+␛[0;32mI (39) boot.esp32: SPI Speed      : 40MHz␛[0m
+␛[0;32mI (44) boot.esp32: SPI Mode       : DIO␛[0m
+␛[0;32mI (48) boot.esp32: SPI Flash Size : 4MB␛[0m
+␛[0;32mI (53) boot: Enabling RNG early entropy source...␛[0m
+␛[0;32mI (58) boot: Partition Table:␛[0m
+␛[0;32mI (62) boot: ## Label            Usage          Type ST Offset   Length␛[0m
+␛[0;32mI (69) boot:  0 nvs              WiFi data        01 02 00009000 00006000␛[0m
+␛[0;32mI (77) boot:  1 phy_init         RF data          01 01 0000f000 00001000␛[0m
+␛[0;32mI (84) boot:  2 factory          factory app      00 00 00010000 00100000␛[0m
+␛[0;32mI (92) boot: End of partition table␛[0m
+␛[0;32mI (96) esp_image: segment 0: paddr=00010020 vaddr=3f400020 size=1647ch ( 91260) map␛[0m
+␛[0;32mI (137) esp_image: segment 1: paddr=000264a4 vaddr=3ff80063 size=00008h (     8) load␛[0m
+␛[0;32mI (137) esp_image: segment 2: paddr=000264b4 vaddr=3ffb0000 size=02158h (  8536) load␛[0m
+␛[0;32mI (146) esp_image: segment 3: paddr=00028614 vaddr=40080000 size=07a04h ( 31236) load␛[0m
+␛[0;32mI (164) esp_image: segment 4: paddr=00030020 vaddr=400d0020 size=392bch (234172) map␛[0m
+␛[0;32mI (249) esp_image: segment 5: paddr=000692e4 vaddr=40087a04 size=14c38h ( 85048) load␛[0m
+␛[0;32mI (285) esp_image: segment 6: paddr=0007df24 vaddr=400c0000 size=00064h (   100) load␛[0m
+␛[0;32mI (299) boot: Loaded app from partition at offset 0x10000␛[0m
+␛[0;32mI (299) boot: Disabling RNG early entropy source...␛[0m
+␛[0;32mI (310) cpu_start: Multicore app␛[0m
+␛[0;32mI (311) cpu_start: Pro cpu up.␛[0m
+␛[0;32mI (311) cpu_start: Starting app cpu, entry point is 0x4008eaac␛[0m
+␛[0;32mI (0) cpu_start: App cpu up.␛[0m
+␛[0;32mI (331) cpu_start: Pro cpu start user code␛[0m
+␛[0;32mI (331) cpu_start: cpu freq: 160000000 Hz␛[0m
+␛[0;32mI (331) cpu_start: Application information:␛[0m
+␛[0;32mI (336) cpu_start: Project name:     eccles_vs_wasm3␛[0m
+␛[0;32mI (341) cpu_start: App version:      1␛[0m
+␛[0;32mI (346) cpu_start: Compile time:     Nov 14 2026 08:30:18␛[0m
+␛[0;32mI (352) cpu_start: ELF file SHA256:  922ed553a2c752a3...␛[0m
+␛[0;32mI (358) cpu_start: ESP-IDF:          5.1.2␛[0m
+␛[0;32mI (363) cpu_start: Min chip rev:     v0.0␛[0m
+␛[0;32mI (367) cpu_start: Max chip rev:     v3.99 ␛[0m
+␛[0;32mI (372) cpu_start: Chip rev:         v3.1␛[0m
+␛[0;32mI (377) heap_init: Initializing. RAM available for dynamic allocation:␛[0m
+␛[0;32mI (384) heap_init: At 3FFAE6E0 len 00001920 (6 KiB): DRAM␛[0m
+␛[0;32mI (390) heap_init: At 3FFBC938 len 000236C8 (141 KiB): DRAM␛[0m
+␛[0;32mI (396) heap_init: At 3FFE0440 len 00003AE0 (14 KiB): D/IRAM␛[0m
+␛[0;32mI (403) heap_init: At 3FFE4350 len 0001BCB0 (111 KiB): D/IRAM␛[0m
+␛[0;32mI (409) heap_init: At 4009C63C len 000039C4 (14 KiB): IRAM␛[0m
+␛[0;32mI (417) spi_flash: detected chip: generic␛[0m
+␛[0;32mI (420) spi_flash: flash io: dio␛[0m
+␛[0;32mI (425) app_start: Starting scheduler on CPU0␛[0m
+␛[0;32mI (429) app_start: Starting scheduler on CPU1␛[0m
+␛[0;32mI (429) main_task: Started on CPU0␛[0m
+␛[0;32mI (439) main_task: Calling app_main()␛[0m
+
+######## eccles-wasm vs wasm3 vs native  (43 kernels, target 300 ms, best of 2)
+CPU 160 MHz-class, FUEL=0
+
+======== PASS 1/2: eccles-wasm (also fixes the iteration count n of every kernel) ========
+heap free 132872, largest block 118784, arena 114688
+eccles-wasm: load+translate 17791 us, 19489 bytes wasm -> 25782 bytes code, arena used 97034 of 113232
+  i32_addxor     n=251151    native      11011 us   eccles     298067 us      27.1x   result identical to native
+  i32_mul        n=420727    native      10530 us   eccles     299336 us      28.4x   result identical to native
+  i32_divu       n=99760     native      23700 us   eccles     300733 us      12.7x   result identical to native
+  i32_divs       n=123122    native      24608 us   eccles     298764 us      12.1x   result identical to native
+  i32_shift      n=178651    native      10061 us   eccles     299464 us      29.8x   result identical to native
+  i32_bitcount   n=167560    native      92236 us   eccles     298691 us       3.2x   result identical to native
+  i64_addxor     n=122314    native      28309 us   eccles     299699 us      10.6x   result identical to native
+  i64_mul        n=211909    native      50296 us   eccles     299417 us       6.0x   result identical to native
+  i64_divu       n=50000     native     109349 us   eccles     280851 us       2.6x   result identical to native
+  i64_shift      n=85365     native      36319 us   eccles     299777 us       8.3x   result identical to native
+  i64_bitcount   n=99469     native     167950 us   eccles     298262 us       1.8x   result identical to native
+  f32_addmul     n=138843    native      11301 us   eccles     299169 us      26.5x   result identical to native
+  f32_div        n=166982    native      73123 us   eccles     298705 us       4.1x   result identical to native
+  f32_sqrt       n=150000    native      91022 us   eccles     250505 us       2.8x   result identical to native
+  f32_cmp        n=65562     native      11304 us   eccles     299770 us      26.5x   result identical to native
+  f64_addmul     n=58207     native     186252 us   eccles     298434 us       1.6x   result identical to native
+  f64_div        n=45242     native     236207 us   eccles     298575 us       1.3x   result identical to native
+  f64_sqrt       n=35432     native     262233 us   eccles     299982 us       1.1x   result identical to native
+  conv_i2f       n=31678     native      54137 us   eccles     299416 us       5.5x   result identical to native
+  conv_f2i       n=22660     native      56251 us   eccles     299572 us       5.3x   result identical to native
+  mem_u8         n=138121    native      11252 us   eccles     283712 us      25.2x   result identical to native
+  mem_sx         n=77095     native       9373 us   eccles     262546 us      28.0x   result identical to native
+  mem_u32        n=120622    native      10604 us   eccles     283944 us      26.8x   result identical to native
+  mem_rand       n=131291    native       9896 us   eccles     281120 us      28.4x   result identical to native
+  mem_copy       n=199       native      14094 us   eccles     269014 us      19.1x   result identical to native
+  mem_bulk       n=15340     native     376697 us   eccles     293660 us       0.8x   result identical to native
+  mem_chase      n=140679    native       7973 us   eccles     275069 us      34.5x   result identical to native
+  mem_hash       n=206       native      13416 us   eccles     182623 us      13.6x   result identical to native
+  call_direct    n=138818    native      18238 us   eccles     299557 us      16.4x   result identical to native
+  call_indirect  n=140607    native      22435 us   eccles     299456 us      13.3x   result identical to native
+  recursion      n=98        native      17602 us   eccles     313761 us      17.8x   result identical to native
+  br_table       n=198465    native      22354 us   eccles     298860 us      13.4x   result identical to native
+  select_branch  n=109601    native      10060 us   eccles     299237 us      29.7x   result identical to native
+  locals         n=112355    native       7031 us   eccles     299379 us      42.6x   result identical to native
+  loop_nest      n=1047      native      15774 us   eccles     299692 us      19.0x   result identical to native
+  i64mix         n=34578     native      20568 us   eccles     298901 us      14.5x   result identical to native
+  crc32          n=26780     native      17590 us   eccles     299833 us      17.0x   result identical to native
+  divrem         n=329       native      19648 us   eccles     331528 us      16.9x   result identical to native
+  imatmul        n=23        native      24296 us   eccles     298567 us      12.3x   result identical to native
+  sieve          n=4         native       8431 us   eccles     242208 us      28.7x   result identical to native
+  sort           n=4         native       8848 us   eccles     262091 us      29.6x   result identical to native
+  f64            n=20        native     162483 us   eccles     285722 us       1.8x   result identical to native
+  f32            n=50        native      17678 us   eccles     204654 us      11.6x   result identical to native
+
+======== PASS 2/2: wasm3 (same module, same n) ========
+wasm3: parse+load 5791 us, heap used 103904 bytes (free 143348)
+  i32_addxor     n=251151    native      11011 us   wasm3      887156 us      80.6x   result identical to native
+  i32_mul        n=420727    native      10530 us   wasm3      850678 us      80.8x   result identical to native
+  i32_divu       n=99760     native      23700 us   wasm3      525392 us      22.2x   result identical to native
+  i32_divs       n=123122    native      24608 us   wasm3      580664 us      23.6x   result identical to native
+  i32_shift      n=178651    native      10061 us   wasm3      575498 us      57.2x   result identical to native
+  i32_bitcount   n=167560    native      92236 us   wasm3      916000 us       9.9x   result identical to native
+  i64_addxor     n=122314    native      28309 us   wasm3      475298 us      16.8x   result identical to native
+  i64_mul        n=211909    native      50296 us   wasm3      462510 us       9.2x   result identical to native
+  i64_divu       n=50000     native     109349 us   wasm3      394567 us       3.6x   result identical to native
+  i64_shift      n=85365     native      36319 us   wasm3      322766 us       8.9x   result identical to native
+  i64_bitcount   n=99469     native     167950 us   wasm3      654787 us       3.9x   result identical to native
+  f32_addmul     n=138843    native      11301 us   wasm3      859714 us      76.1x   result identical to native
+  f32_div        n=166982    native      73123 us   wasm3      709189 us       9.7x   result identical to native
+  f32_sqrt       n=150000    native      91022 us   wasm3      691910 us       7.6x   result identical to native
+  f32_cmp        n=65562     native      11304 us   wasm3      738580 us      65.3x   result identical to native
+  f64_addmul     n=58207     native     186252 us   wasm3      406724 us       2.2x   result identical to native
+  f64_div        n=45242     native     236207 us   wasm3      342031 us       1.4x   result identical to native
+  f64_sqrt       n=35432     native     262233 us   wasm3      346547 us       1.3x   result identical to native
+  conv_i2f       n=31678     native      54137 us   wasm3      470613 us       8.7x   result identical to native
+  conv_f2i       n=22660     native      56251 us   wasm3      440043 us       7.8x   result identical to native
+  mem_u8         n=138121    native      11252 us   wasm3      735884 us      65.4x   result identical to native
+  mem_sx         n=77095     native       9373 us   wasm3      587951 us      62.7x   result identical to native
+  mem_u32        n=120622    native      10604 us   wasm3      694049 us      65.5x   result identical to native
+  mem_rand       n=131291    native       9896 us   wasm3      661209 us      66.8x   result identical to native
+  mem_copy       n=199       native      14094 us   wasm3      678081 us      48.1x   result identical to native
+  mem_bulk       n=15340     native     376697 us   wasm3      335470 us       0.9x   result identical to native
+  mem_chase      n=140679    native       7973 us   wasm3      589926 us      74.0x   result identical to native
+  mem_hash       n=206       native      13416 us   wasm3      456857 us      34.1x   result identical to native
+  call_direct    n=138818    native      18238 us   wasm3      657312 us      36.0x   result identical to native
+  call_indirect  n=140607    native      22435 us   wasm3      779671 us      34.8x   result identical to native
+  recursion      n=98        native      17602 us   wasm3      642029 us      36.5x   result identical to native
+  br_table       n=198465    native      22354 us   wasm3      561623 us      25.1x   result identical to native
+  select_branch  n=109601    native      10060 us   wasm3      695250 us      69.1x   result identical to native
+  locals         n=112355    native       7031 us   wasm3      644791 us      91.7x   result identical to native
+  loop_nest      n=1047      native      15774 us   wasm3      874267 us      55.4x   result identical to native
+  i64mix         n=34578     native      20568 us   wasm3      365326 us      17.8x   result identical to native
+  crc32          n=26780     native      17590 us   wasm3      729143 us      41.5x   result identical to native
+  divrem         n=329       native      19648 us   wasm3      542638 us      27.6x   result identical to native
+  imatmul        n=23        native      24296 us   wasm3      688802 us      28.4x   result identical to native
+  sieve          n=4         native       8431 us   wasm3      297157 us      35.2x   result identical to native
+  sort           n=4         native       8848 us   wasm3      557728 us      63.0x   result identical to native
+  f64            n=20        native     162483 us   wasm3      361295 us       2.2x   result identical to native
+  f32            n=50        native      17678 us   wasm3      532857 us      30.1x   result identical to native
+
+
+######## RESULTS (time per call in microseconds; ratio = interpreter time / native time; lower is better)
+kernel                 n  native us  eccles us   wasm3 us eccles x  wasm3 x wasm3 gain  checksums
+i32_addxor        251151      11011     298067     887156    27.1x    80.6x     0.34x  all 3 identical
+i32_mul           420727      10530     299336     850678    28.4x    80.8x     0.35x  all 3 identical
+i32_divu           99760      23700     300733     525392    12.7x    22.2x     0.57x  all 3 identical
+i32_divs          123122      24608     298764     580664    12.1x    23.6x     0.51x  all 3 identical
+i32_shift         178651      10061     299464     575498    29.8x    57.2x     0.52x  all 3 identical
+i32_bitcount      167560      92236     298691     916000     3.2x     9.9x     0.33x  all 3 identical
+i64_addxor        122314      28309     299699     475298    10.6x    16.8x     0.63x  all 3 identical
+i64_mul           211909      50296     299417     462510     6.0x     9.2x     0.65x  all 3 identical
+i64_divu           50000     109349     280851     394567     2.6x     3.6x     0.71x  all 3 identical
+i64_shift          85365      36319     299777     322766     8.3x     8.9x     0.93x  all 3 identical
+i64_bitcount       99469     167950     298262     654787     1.8x     3.9x     0.46x  all 3 identical
+f32_addmul        138843      11301     299169     859714    26.5x    76.1x     0.35x  all 3 identical
+f32_div           166982      73123     298705     709189     4.1x     9.7x     0.42x  all 3 identical
+f32_sqrt          150000      91022     250505     691910     2.8x     7.6x     0.36x  all 3 identical
+f32_cmp            65562      11304     299770     738580    26.5x    65.3x     0.41x  all 3 identical
+f64_addmul         58207     186252     298434     406724     1.6x     2.2x     0.73x  all 3 identical
+f64_div            45242     236207     298575     342031     1.3x     1.4x     0.87x  all 3 identical
+f64_sqrt           35432     262233     299982     346547     1.1x     1.3x     0.87x  all 3 identical
+conv_i2f           31678      54137     299416     470613     5.5x     8.7x     0.64x  all 3 identical
+conv_f2i           22660      56251     299572     440043     5.3x     7.8x     0.68x  all 3 identical
+mem_u8            138121      11252     283712     735884    25.2x    65.4x     0.39x  all 3 identical
+mem_sx             77095       9373     262546     587951    28.0x    62.7x     0.45x  all 3 identical
+mem_u32           120622      10604     283944     694049    26.8x    65.5x     0.41x  all 3 identical
+mem_rand          131291       9896     281120     661209    28.4x    66.8x     0.43x  all 3 identical
+mem_copy             199      14094     269014     678081    19.1x    48.1x     0.40x  all 3 identical
+mem_bulk           15340     376697     293660     335470     0.8x     0.9x     0.88x  all 3 identical
+mem_chase         140679       7973     275069     589926    34.5x    74.0x     0.47x  all 3 identical
+mem_hash             206      13416     182623     456857    13.6x    34.1x     0.40x  all 3 identical
+call_direct       138818      18238     299557     657312    16.4x    36.0x     0.46x  all 3 identical
+call_indirect     140607      22435     299456     779671    13.3x    34.8x     0.38x  all 3 identical
+recursion             98      17602     313761     642029    17.8x    36.5x     0.49x  all 3 identical
+br_table          198465      22354     298860     561623    13.4x    25.1x     0.53x  all 3 identical
+select_branch     109601      10060     299237     695250    29.7x    69.1x     0.43x  all 3 identical
+locals            112355       7031     299379     644791    42.6x    91.7x     0.46x  all 3 identical
+loop_nest           1047      15774     299692     874267    19.0x    55.4x     0.34x  all 3 identical
+i64mix             34578      20568     298901     365326    14.5x    17.8x     0.82x  all 3 identical
+crc32              26780      17590     299833     729143    17.0x    41.5x     0.41x  all 3 identical
+divrem               329      19648     331528     542638    16.9x    27.6x     0.61x  all 3 identical
+imatmul               23      24296     298567     688802    12.3x    28.4x     0.43x  all 3 identical
+sieve                  4       8431     242208     297157    28.7x    35.2x     0.82x  all 3 identical
+sort                   4       8848     262091     557728    29.6x    63.0x     0.47x  all 3 identical
+f64                   20     162483     285722     361295     1.8x     2.2x     0.79x  all 3 identical
+f32                   50      17678     204654     532857    11.6x    30.1x     0.38x  all 3 identical
+
+---- geometric mean per group: slowdown vs native ----
+group           eccles x   wasm3 x wasm3 faster
+i32 ops            15.0x     35.3x        0.43x   (6 kernels)
+i64 ops             4.7x      7.2x        0.66x   (5 kernels)
+f32 ops             9.4x     24.6x        0.38x   (4 kernels)
+f64 ops             1.3x      1.6x        0.82x   (3 kernels)
+conversions         5.4x      8.2x        0.66x   (2 kernels)
+memory             15.7x     34.3x        0.46x   (8 kernels)
+control flow       19.9x     45.5x        0.44x   (7 kernels)
+heavy kernels      13.1x     23.3x        0.56x   (8 kernels)
+ALL                10.4x     20.5x        0.51x   (43 kernels)
+
+wasm3 was faster on 0 kernels, eccles-wasm on 43.
+RESULT: all checksums identical between native, eccles-wasm and wasm3
+heap free 247252
+######## DONE - nothing more will run

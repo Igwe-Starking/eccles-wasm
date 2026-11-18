@@ -1,0 +1,1 @@
+Eccles WASM {{version}} · MIT · [Repository](https://github.com/igwe-starking/eccles-wasm) · [Report a problem](https://github.com/igwe-starking/eccles-wasm/issues) · [Support ♥](https://paystack.shop/pay/support-eccles-wasm-t1)

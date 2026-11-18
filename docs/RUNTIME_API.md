@@ -10,9 +10,49 @@ one API. Every import returns an `i32` status:
 | 0 | SUCCESSFUL |
 | 1 | FAILED - the chip tried and failed (bad pin, bus error, timeout) |
 | 2 | UNSUPPORTED - this chip/backend cannot do it (no DAC, no IRQ support, ...) |
+| 3 | DENIED - the host has not granted this module that hardware (see "Permissions") |
 
 Results come back through pointers into the guest's own memory (`read(pin, &level)`). A failing or
 unsupported call never traps the guest - it just returns the status, so one binary can adapt to the chip.
+
+## Permissions: the host decides what a module may touch
+
+A module gets **no hardware by default**. The code that loads and runs it grants what it needs, per instance,
+and can change the grant between calls to `eccles_wasm_run()`/`eccles_wasm_call()`:
+
+```c
+eccles_wasm_set_hal_privilege(ECCLES_WASM_ALLOW_READ_ONLY);             // sensors yes, actuators no
+eccles_wasm_set_hal_privilege(ECCLES_WASM_ALLOW_ALL);                   // trust the module completely
+
+eccles_wasm_privilege_t p;                                              // fine-grained
+eccles_wasm_privilege_init(&p, ECCLES_WASM_ALLOW_PIN_ALL | ECCLES_WASM_PERM_TIME);
+eccles_wasm_privilege_allow_pin(&p, 2);                                 // only pin 2 ...
+eccles_wasm_privilege_allow_pin_range(&p, 14, 17);                      // ... and 14..17
+eccles_wasm_set_privilege(&p);                                          // (several instances: eccles_wasm_vm_set_privilege(vm, &p))
+```
+
+| preset | grants |
+|---|---|
+| `ECCLES_WASM_ALLOW_NONE` (default) | nothing - the module can compute and return values |
+| `ECCLES_WASM_ALLOW_SAFE` | time, random, console log |
+| `ECCLES_WASM_ALLOW_READ_ONLY` | SAFE + read pins + ADC |
+| `ECCLES_WASM_ALLOW_PIN_ALL` | every pin operation (read, write, config, analog out, ADC, interrupts) - no buses, no power |
+| `ECCLES_WASM_ALLOW_BUSES` | UART + I2C + SPI |
+| `ECCLES_WASM_ALLOW_ALL` | everything |
+
+Individual bits combine freely: `PERM_GPIO_READ`, `GPIO_WRITE` (enable/disable/toggle/write), `GPIO_CONFIG` (mode),
+`ANALOG_OUT` (analog/pwm/dac), `ADC`, `IRQ`, `UART`, `I2C`, `SPI`, `TIME` (millis/micros/sleep/yield), `RANDOM`, `LOG`,
+`WDT`, `POWER` (deep_sleep/reset), `THREADS` (thread-spawn). On top of the bits: a **pin allow-list**
+(`allow_pin`, `allow_pin_range` - pins named in bus setup count too), a **bus allow-list**
+(`allow_bus(&p, ECCLES_WASM_BUS_I2C, 1)`) and an **I2C address allow-list** (`allow_i2c_addr(&p, 0x50, 0x57)`).
+
+A refused call returns `DENIED` (3) to the module - it is not a trap, nothing touches the chip, and the instance counts it
+(`eccles_wasm_denied_count()`, `eccles_wasm_last_denied()`, `eccles_wasm_vm_set_denied_hook()` for audit logging).
+WASI follows the same policy (`fd_write` needs LOG, `clock_time_get`/`sched_yield` need TIME, `random_get` needs RANDOM; refusal
+is errno 76). Host C code calling `eccles_wasm_enable()` etc. directly is never restricted.
+Change the starting default with `ECCLES_WASM_DEFAULT_PRIVILEGE`. The policy is a hard boundary only as far as the interpreter
+is: it governs what a module can *ask the runtime* to do, so keep your own host functions (`eccles_wasm_register`) as careful as
+you want your module to be.
 
 ## Import list (arguments are all i32)
 
@@ -74,6 +114,7 @@ eccles_wasm_load("/fs/app.wasm");      /* or eccles_wasm_vm_load(vm, ...) for se
 eccles_wasm_run("setup");
 for (;;) eccles_wasm_run("loop");
 ```
+Or export one `main` that loops inside the module and call `eccles_wasm_run("main")` once (it blocks; keep fuel at 0).
 Add your own imports with `eccles_wasm_register("name", fn, "i(ii)")`; read/write guest memory from them with
 `eccles_wasm_vm_mem(vm, addr, len)`.
 

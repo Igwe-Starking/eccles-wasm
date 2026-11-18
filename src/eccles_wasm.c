@@ -1,11 +1,31 @@
 /*
-    ECCLES WASM - implementation
-    Streaming loader + validating translator + interpreter + hardware backends.
-    Layout of this file:
-      1. state, arena, error handling      4. interpreter
-      2. streaming reader                  5. public runtime API, file loading
-      3. section loader + translator       6. hardware backends + import table
-*/
+ * MIT License
+ *
+ * Copyright (c) 2025-2026 Nwobodo Ecclesiastes Chidera
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
+
+//eccles_wasm.c the implementation: streaming loader, translator, interpreter and the hardware backends
+//in this order: 1 state + arena, 2 streaming reader, 3 section loader + translator, 4 interpreter,
+//5 public runtime api + file loading, 6 hardware backends + import table
+//TODO: split this file into smaller units, it is getting long
 
 #if (defined(__unix__) || defined(__APPLE__)) && !defined(ESP_PLATFORM) && !defined(ARDUINO) \
     && !defined(__ZEPHYR__) && !defined(_POSIX_C_SOURCE)
@@ -15,12 +35,14 @@
 #include "eccles_wasm.h"
 #include <string.h>
 #if !defined(ECCLES_WASM_NO_FLOAT)
-  #include <math.h>      /* sqrt/sqrtf only */
+  #include <math.h>  //sqrt/sqrtf only
 #endif
 #if ECCLES_WASM_USE_HEAP
   #include <stdlib.h>
 #endif
 
+//debug logging, if you define ECCLES_WASM_DEBUG it prints to the console
+//i use it a lot when the translator refuses a module and i dont know why
 #if defined(ECCLES_WASM_DEBUG)
   #ifndef ECCLES_WASM_LOG_LINE
     #include <stdio.h>
@@ -35,27 +57,64 @@
 #if defined(__GNUC__) || defined(__clang__)
   #define W_ALIGN8 __attribute__((aligned(8)))
   #define W_UNLIKELY(x) __builtin_expect(!!(x), 0)
-  #define W_MAYBE_UNUSED __attribute__((unused))
 #else
   #define W_ALIGN8
   #define W_UNLIKELY(x) (x)
-  #define W_MAYBE_UNUSED
 #endif
 
+//shr_s is written as a C >> on signed values, that is implementation defined in iso c but arithmetic on every compiler i target
+//(gcc, clang, msvc, iar, keil, ti, xc). when a compiler is not like that the build fails right here
+typedef char w_asr32_check[((-1) >> 1) == -1 ? 1 : -1];
+typedef char w_asr64_check[((-1LL) >> 1) == -1LL ? 1 : -1];
+
+//ECCLES_WASM_EXEC_IRAM puts w_exec (the interpreter loop) in internal ram, the attribute depends on the chip
+//you can always set ECCLES_WASM_IRAM_ATTR yourself (same thing for chips i dont know about)
+#if ECCLES_WASM_EXEC_IRAM
+  #if ECCLES_WASM_IS_ESP
+    #include "esp_attr.h"
+    #define W_EXEC_DATA DRAM_ATTR
+  #endif
+  #ifndef ECCLES_WASM_IRAM_ATTR
+    #if ECCLES_WASM_IS_ESP
+      #define ECCLES_WASM_IRAM_ATTR IRAM_ATTR
+    #elif ECCLES_WASM_PLATFORM == ECCLES_WASM_PLAT_PICO
+      #define ECCLES_WASM_IRAM_ATTR __attribute__((section(".time_critical.eccles_wasm_exec")))
+    #elif ECCLES_WASM_PLATFORM == ECCLES_WASM_PLAT_STM32_HAL
+      #define ECCLES_WASM_IRAM_ATTR __attribute__((section(".RamFunc")))
+    #elif ECCLES_WASM_PLATFORM == ECCLES_WASM_PLAT_ZEPHYR
+      #include <zephyr/kernel.h>
+      #define ECCLES_WASM_IRAM_ATTR __ramfunc
+    #elif ECCLES_WASM_PLATFORM == ECCLES_WASM_PLAT_HOST
+      #define ECCLES_WASM_IRAM_ATTR
+    #else
+      #error "ECCLES_WASM_EXEC_IRAM: dont know the ram function attribute of this chip, define ECCLES_WASM_IRAM_ATTR yourself"
+    #endif
+  #endif
+  //noinline, else the compiler can fold w_exec back into its caller and that one sits in flash
+  #if defined(__GNUC__) || defined(__clang__)
+    #define W_EXEC_ATTR ECCLES_WASM_IRAM_ATTR __attribute__((noinline))
+  #else
+    #define W_EXEC_ATTR ECCLES_WASM_IRAM_ATTR
+  #endif
+#else
+  #define W_EXEC_ATTR
+#endif
+#ifndef W_EXEC_DATA
+  #define W_EXEC_DATA
+#endif
+
+//W_NIL marks a slot that has no patch yet (end of a patch list)
 #define W_NIL 0xFFFFFFFFu
 #define W_PAGE 65536u
 
-/* ===================================================================== *
- *  1. state
- * ===================================================================== */
+//1. state
 
-/* ---- fused ("super") instructions ------------------------------------------------------------
-   The translator folds the most common instruction sequences of compiled code into one handler:
-     local.get a; local.get b; <i32 op>        -> FLL   (also FLC with a constant, FSC/FSL with one stack operand)
-     <alu op>; local.set d                      -> FLLS / FLCS   (result goes straight to the local)
-     <i32 compare>; br_if / if                  -> BSS / BLC / BLL (compare and branch in one dispatch)
-     local.get a; i32.load                      -> OP_LLD32 / OP_LLD8U      local.get/i32.const; local.set -> OP_MOVE / OP_SETC
-   They are produced and consumed only inside this file; nothing about them is visible in the module format. */
+//fused ("super") instructions: the translator folds the most common sequences of compiled code into ONE handler
+//local.get a; local.get b; <i32 op> becomes FLL (FLC with a constant, FSC/FSL with one stack operand)
+//<alu op>; local.set d becomes FLLS / FLCS so the result goes straight to the local
+//<i32 compare>; br_if / if becomes BSS / BLC / BLL, compare and branch in one dispatch
+//local.get a; i32.load becomes OP_LLD32 / OP_LLD8U and local.get/i32.const; local.set becomes OP_MOVE / OP_SETC
+//they only exist inside this file, nothing about them is visible in the module format
 #define W_ALU_LIST(X) \
     X(ADD, 0x6A, a + b) X(SUB, 0x6B, a - b) X(MUL, 0x6C, a * b) X(AND, 0x71, a & b) X(OR, 0x72, a | b) \
     X(XOR, 0x73, a ^ b) X(SHL, 0x74, a << (b & 31)) X(SHRS, 0x75, (uint32_t)((int32_t)a >> (b & 31))) \
@@ -81,7 +140,7 @@ enum {
     OP_MOVE, OP_SETC, OP_LLD32, OP_LLD8U,
     W_FUSED_END
 };
-static int w_fuse_idx(uint32_t op) {                 /* i32 ALU/compare opcode -> index in W_FUSE_LIST, or -1 */
+static int w_fuse_idx(uint32_t op) {  //i32 ALU/compare opcode -> index in W_FUSE_LIST, or -1
     int i = 0;
 #define X(n, o, e) if (op == (o)) return i; i++;
     W_FUSE_LIST(X)
@@ -90,12 +149,12 @@ static int w_fuse_idx(uint32_t op) {                 /* i32 ALU/compare opcode -
 }
 
 typedef struct {
-    const uint16_t   *code;     /* translated body; NULL for host functions */
+    const uint16_t   *code;  //translated body; NULL for host functions
     eccles_wasm_host_fn host;
-    uint16_t type;              /* canonical type id */
+    uint16_t type;  //canonical type id
     uint16_t nparams;
-    uint16_t nlocals;           /* locals beyond the parameters */
-    uint16_t max_h;             /* peak slots (params + locals + operands) */
+    uint16_t nlocals;  //locals beyond the parameters
+    uint16_t max_h;  //peak slots (params + locals + operands)
     uint8_t  nresults;
 } w_func_t;
 
@@ -103,10 +162,10 @@ typedef struct { const char *name; uint16_t func; } w_export_t;
 typedef struct { const uint16_t *pc; uint64_t *fp; const w_func_t *f; } w_frame_t;
 typedef struct { const char *name; eccles_wasm_host_fn fn; const char *sig; } w_host_t;
 
-typedef struct { uint32_t *elems; uint32_t size; } w_table_t;      /* elements: 0 = null, else function index + 1 (funcref) */
-typedef struct { const uint32_t *items; uint32_t len; } w_eseg_t;    /* passive element segment (len 0 = dropped) */
+typedef struct { uint32_t *elems; uint32_t size; } w_table_t;  //elements: 0 = null, else function index + 1 (funcref)
+typedef struct { const uint32_t *items; uint32_t len; } w_eseg_t;  //passive element segment (len 0 = dropped)
 
-/* translator state (load time only) */
+//translator state (load time only)
 typedef struct { uint32_t patch, loop_pc, else_slot; uint16_t base; uint8_t np, nr, kind, reach; } w_ctl_t;
 enum { K_FUNC, K_BLOCK, K_LOOP, K_IF, K_ELSE };
 typedef struct {
@@ -115,13 +174,13 @@ typedef struct {
     uint16_t nloc;
     uint8_t  nctl, dead;
     w_ctl_t  ctl[ECCLES_WASM_MAX_CTL];
-    /* peephole window: the last (up to) two operand-producing instructions, and the last instruction */
+    //peephole window: the last (up to) two operand-producing instructions, and the last instruction
     uint32_t hpos[2], hend[2], hval[2]; uint8_t hkind[2], nh;
     uint32_t lpos, lend; uint8_t lkind, lidx;
 } w_trans_t;
 enum { HK_LGET = 1, HK_ICONST = 2, LK_CMP_SS = 1, LK_CMP_LC = 2, LK_CMP_LL = 3, LK_ALU_LC = 4, LK_ALU_LL = 5 };
 
-/* streaming reader (load time only) */
+//streaming reader (load time only)
 typedef struct {
     eccles_wasm_read_fn fn;
     void *ctx;
@@ -131,21 +190,23 @@ typedef struct {
     uint8_t  chunk[ECCLES_WASM_CHUNK_SIZE];
 } w_reader_t;
 
-/* One complete, independent instance. Lives at the start of its own arena. */
+//one complete, independent instance. Lives at the start of its own arena.
 struct eccles_wasm_vm_s {
-    /* arena */
+    //arena
     uint8_t *base, *end, *lo, *hi, *hi_init;
     uint8_t  inited, loaded, running;
-    void    *heap_block;            /* non-NULL: free() this on destroy */
+    void    *heap_block;  //non-NULL: free() this on destroy
     void    *user;
-    /* diagnostics */
+    eccles_wasm_privilege_t priv;  //what guest imports may do with the chip
+    uint32_t denied; const char *last_denied; eccles_wasm_denied_fn denied_hook;
+    //diagnostics
     eccles_wasm_error_t err;
     uint32_t err_info;
     char     err_str[ECCLES_WASM_MAX_NAME + 1];
-    /* module */
+    //module
     uint16_t ntypes, nfuncs, nimports, nglobals, nexports, start;
-    uint8_t  has_mem, code_seen;
-    uint8_t *types;                 /* concatenated records: np, nr, params.., results.. */
+    uint8_t  has_mem, code_seen, mem_shared, snap_ok;
+    uint8_t *types;  //concatenated records: np, nr, params.., results..
     uint16_t *type_off, *type_canon;
     w_func_t *funcs;
     uint64_t *globals;
@@ -156,25 +217,30 @@ struct eccles_wasm_vm_s {
     w_export_t *exports;
     uint8_t *mem;
     uint32_t mem_bytes, mem_pages, code_bytes;
-    struct w_seg { const uint8_t *p; uint32_t len; } *segs;   /* passive data segments (len 0 = dropped) */
+    struct w_seg { const uint8_t *p; uint32_t len; } *segs;  //passive data segments (len 0 = dropped)
     uint16_t nseg;
-    /* runtime */
+#if ECCLES_WASM_THREADS
+    eccles_wasm_vm_t *parent;  //non-NULL: a sibling sharing the parent's code and memory
+    eccles_wasm_thread_spawn_fn spawn_cb; void *spawn_ctx;
+    uint64_t *g0; uint32_t *t0; w_eseg_t *eseg0; struct w_seg *segs0;  //post-instantiation snapshot for siblings
+#endif
+    //runtime
     uint64_t *stk;
     w_frame_t *frames;
     uint32_t fuel_budget;
     uint8_t  exit_req;
     int32_t  exit_code;
     uint32_t wasi_last; uint64_t wasi_acc;
-    /* per-instance host functions */
+    //per-instance host functions
     w_host_t host[ECCLES_WASM_MAX_HOST_FUNCS];
     uint8_t  nhost;
-    /* load-time scratch */
+    //load-time scratch
     eccles_wasm_fs_read_fn fs_rd; void *fs_h;
     w_reader_t rd;
     w_trans_t  tr;
 };
 
-/* chip-level state shared by every instance (set once at start-up) */
+//chip-level state shared by every instance (set once at start-up)
 static eccles_wasm_hal_t g_hal_user;
 static eccles_wasm_fs_open_fn  g_fs_open;
 static eccles_wasm_fs_read_fn  g_fs_read;
@@ -184,11 +250,15 @@ static eccles_wasm_fs_close_fn g_fs_close;
 static uint8_t g_arena[ECCLES_WASM_ARENA_SIZE] W_ALIGN8;
 #endif
 
+//records the FIRST error only, later errors are ignored because they are usually just a result of the first one
 static void w_fail(eccles_wasm_vm_t *vm, eccles_wasm_error_t e, uint32_t info) {
     if (vm->err == ECCLES_WASM_OK) { vm->err = e; vm->err_info = info; }
 }
 
-/* ---- arena: bump from both ends ------------------------------------- */
+//arena: bump from both ends
+//low allocator, grows up from the start of the arena. used for the module data (types, funcs, translated code)
+//NOTE: the overflow check (p + size < p) is for 32bit targets where the pointer can wrap around, found this the hard way
+//nothing is freed one by one, the whole module is dropped at once by w_module_reset()
 static void *w_alo(eccles_wasm_vm_t *vm, size_t size, size_t align) {
     uintptr_t p = ((uintptr_t)vm->lo + (align - 1)) & ~(uintptr_t)(align - 1);
     if (vm->err != ECCLES_WASM_OK) return NULL;
@@ -198,6 +268,7 @@ static void *w_alo(eccles_wasm_vm_t *vm, size_t size, size_t align) {
     vm->lo = (uint8_t *)(p + size);
     return (void *)p;
 }
+//high allocator, grows down from the end of the arena. value stack, call stack and linear memory live here
 static void *w_ahi(eccles_wasm_vm_t *vm, size_t size, size_t align) {
     uintptr_t p;
     if (vm->err != ECCLES_WASM_OK) return NULL;
@@ -208,13 +279,13 @@ static void *w_ahi(eccles_wasm_vm_t *vm, size_t size, size_t align) {
     return (void *)p;
 }
 
-/* ===================================================================== *
- *  2. streaming reader
- * ===================================================================== */
+//2. streaming reader
 
 
+//current position in the .wasm file (not in the chunk), used for the error info so you know where the module is bad
 static uint32_t rd_pos(eccles_wasm_vm_t *vm) { return vm->rd.pos0 + (uint32_t)(vm->rd.p - vm->rd.start); }
 
+//refills the chunk buffer from the stream, returns 0 when there is nothing more to read
 static int rd_fill(eccles_wasm_vm_t *vm) {
     int n;
     if (vm->rd.mem_src || !vm->rd.fn || vm->rd.eof) return 0;
@@ -229,6 +300,7 @@ static int rd_u8(eccles_wasm_vm_t *vm) {
     if (vm->rd.p >= vm->rd.e && !rd_fill(vm)) { w_fail(vm, ECCLES_WASM_ERR_MALFORMED, rd_pos(vm)); return 0; }
     return *vm->rd.p++;
 }
+//reads a LEB128 unsigned int (max 5 bytes). NOTE: wasm uses leb128 everywhere so this function is very hot while loading
 static uint32_t rd_u32(eccles_wasm_vm_t *vm) {
     uint32_t r = 0; unsigned s = 0; int b;
     for (;;) {
@@ -241,6 +313,7 @@ static uint32_t rd_u32(eccles_wasm_vm_t *vm) {
     if (s == 28 && (b & 0x70)) w_fail(vm, ECCLES_WASM_ERR_MALFORMED, rd_pos(vm));
     return r;
 }
+//signed leb128 for 64bit, the sign extension part confused me for a whole weekend
 static int64_t rd_s64(eccles_wasm_vm_t *vm) {
     uint64_t r = 0; unsigned s = 0; int b;
     do {
@@ -264,6 +337,7 @@ static uint64_t rd_le(eccles_wasm_vm_t *vm, unsigned n) {
     return v;
 }
 #endif
+//skip n bytes without storing them (custom sections and so on)
 static void rd_skip(eccles_wasm_vm_t *vm, uint32_t n) {
     while (n && !vm->err) {
         uint32_t avail = (uint32_t)(vm->rd.e - vm->rd.p), t;
@@ -271,6 +345,7 @@ static void rd_skip(eccles_wasm_vm_t *vm, uint32_t n) {
         t = n < avail ? n : avail; vm->rd.p += t; n -= t;
     }
 }
+//copy n bytes into dst, used for the header and the data segments
 static void rd_bytes(eccles_wasm_vm_t *vm, uint8_t *dst, uint32_t n) {
     while (n && !vm->err) {
         uint32_t avail = (uint32_t)(vm->rd.e - vm->rd.p), t;
@@ -278,7 +353,7 @@ static void rd_bytes(eccles_wasm_vm_t *vm, uint8_t *dst, uint32_t n) {
         t = n < avail ? n : avail; memcpy(dst, vm->rd.p, t); dst += t; vm->rd.p += t; n -= t;
     }
 }
-/* read a name; copy at most cap-1 bytes (NUL-terminated) into dst (may be NULL) */
+//read a name; copy at most cap-1 bytes (NUL-terminated) into dst (may be NULL)
 static uint32_t rd_name(eccles_wasm_vm_t *vm, char *dst, uint32_t cap) {
     uint32_t len = rd_u32(vm), keep = 0;
     if (dst && cap) { keep = len < cap - 1 ? len : cap - 1; rd_bytes(vm, (uint8_t *)dst, keep); dst[keep] = 0; }
@@ -286,15 +361,13 @@ static uint32_t rd_name(eccles_wasm_vm_t *vm, char *dst, uint32_t cap) {
     return len;
 }
 
-/* ===================================================================== *
- *  3. module loader + translator
- * ===================================================================== */
+//3. module loader + translator
 
-/* internal opcodes (wasm opcodes 0x00..0xC4 are used as-is) */
+//internal opcodes (wasm opcodes 0x00..0xC4 are used as-is)
 enum {
-    OP_SAT0 = 0x100,                       /* 0x100..0x107 trunc_sat */
+    OP_SAT0 = 0x100,  //0x100..0x107 trunc_sat
     OP_MEMCOPY = 0x10A, OP_MEMFILL = 0x10B, OP_MEMINIT = 0x10C, OP_DATADROP = 0x10D, OP_TABINIT = 0x10E, OP_ELEMDROP = 0x10F,
-    OP_TABCOPY = 0x120, OP_TABGROW, OP_TABSIZE, OP_TABFILL, OP_RETCALL, OP_RETCALL_IND,
+    OP_TABCOPY = 0x120, OP_TABGROW, OP_TABSIZE, OP_TABFILL, OP_RETCALL, OP_RETCALL_IND, OP_ATOMIC, OP_AWAIT,
     OP_BR = 0x110, OP_BR_FIX, OP_BR_IF, OP_BR_IF_FIX, OP_BR_TABLE, OP_JZ
 };
 
@@ -303,22 +376,24 @@ static int w_find_host(eccles_wasm_vm_t *vm, const char *name, eccles_wasm_host_
 static eccles_wasm_status_t w_trap_stub(eccles_wasm_vm_t *vm, uint64_t *s) { (void)vm; (void)s; return ECCLES_WASM_FAILED; }
 #endif
 
+//returns the record of a type (np, nr, params.., results..)
 static const uint8_t *w_rec(eccles_wasm_vm_t *vm, uint32_t type_index) { return vm->types + vm->type_off[type_index]; }
 
+//only i32 i64 f32 f64 funcref and externref are valid here (no v128), with NO_FLOAT the float types are rejected also
 static int w_valtype_ok(int t) {
-    if (t == 0x7F || t == 0x7E || t == 0x70 || t == 0x6F) return 1;       /* i32 i64 funcref externref */
+    if (t == 0x7F || t == 0x7E || t == 0x70 || t == 0x6F) return 1;  //i32 i64 funcref externref
 #if !defined(ECCLES_WASM_NO_FLOAT)
     if (t == 0x7D || t == 0x7C) return 1;
 #endif
     return 0;
 }
-static int w_vt(eccles_wasm_vm_t *vm) {                      /* read + validate a value type */
+static int w_vt(eccles_wasm_vm_t *vm) {  //read + validate a value type
     int t = rd_u8(vm);
     if (!vm->err && !w_valtype_ok(t)) { w_fail(vm, ECCLES_WASM_ERR_UNSUPPORTED_FEATURE, (uint32_t)t); return 0; }
     return t;
 }
 
-/* "i(ii)" -> type record [np, nr, params..., results...]; returns length or 0 */
+//"i(ii)" -> type record [np, nr, params..., results...]; returns length or 0
 static uint32_t w_sig(const char *s, uint8_t *out, uint32_t cap) {
     uint32_t np = 0, k;
     static const char L[] = "iIfF"; static const uint8_t V[] = {0x7F, 0x7E, 0x7D, 0x7C};
@@ -340,14 +415,18 @@ static uint32_t w_sig(const char *s, uint8_t *out, uint32_t cap) {
 }
 
 
+//malformed module, saves the file position so you can find the bad byte with a hex editor
 static void t_bad(eccles_wasm_vm_t *vm) { w_fail(vm, ECCLES_WASM_ERR_MALFORMED, rd_pos(vm)); }
+//emit one 16bit word to the translated code. NOTE: we use 16bit words not bytes because of alignment on cortex m0 / esp32
 static void t_emit(eccles_wasm_vm_t *vm, uint32_t w) {
     if (vm->tr.n >= vm->tr.cap) { w_fail(vm, ECCLES_WASM_ERR_NO_MEMORY, (uint32_t)(((uintptr_t)(vm->tr.code + vm->tr.n) - (uintptr_t)vm->lo) + 2)); return; }
     vm->tr.code[vm->tr.n++] = (uint16_t)w;
 }
+//32bit values are written as two words, low one first
 static void t_emit32(eccles_wasm_vm_t *vm, uint32_t v) { t_emit(vm, v & 0xFFFFu); t_emit(vm, v >> 16); }
 static uint32_t t_get32(eccles_wasm_vm_t *vm, uint32_t at) { return (uint32_t)vm->tr.code[at] | ((uint32_t)vm->tr.code[at + 1] << 16); }
 static void t_put32(eccles_wasm_vm_t *vm, uint32_t at, uint32_t v) { vm->tr.code[at] = (uint16_t)v; vm->tr.code[at + 1] = (uint16_t)(v >> 16); }
+//t_pop and t_push only track the HEIGHT of the operand stack, not the types. thats why the validation is structural
 static void t_pop(eccles_wasm_vm_t *vm, uint32_t k) {
     if (vm->tr.nctl == 0 || vm->tr.h < (uint32_t)vm->tr.ctl[vm->tr.nctl - 1].base + k) { t_bad(vm); return; }
     vm->tr.h -= k;
@@ -357,20 +436,23 @@ static void t_push(eccles_wasm_vm_t *vm, uint32_t k) {
     if (vm->tr.h > vm->tr.maxh) vm->tr.maxh = vm->tr.h;
     if (vm->tr.h > ECCLES_WASM_VALUE_STACK_SLOTS) w_fail(vm, ECCLES_WASM_ERR_LIMIT, vm->tr.h);
 }
+//patch all the branches waiting for this label
 static void t_resolve(eccles_wasm_vm_t *vm, uint32_t head, uint32_t target) {
     while (head != W_NIL) {
         uint32_t nxt = t_get32(vm, head);
-        t_put32(vm, head, target - head);            /* two's complement relative offset */
+        t_put32(vm, head, target - head);  //two's complement relative offset
         head = nxt;
     }
 }
-/* emit the 32-bit jump slot for a branch to frame f */
+//emit the 32-bit jump slot for a branch to frame f
 static void t_target(eccles_wasm_vm_t *vm, w_ctl_t *f) {
     uint32_t s = vm->tr.n;
     if (f->kind == K_LOOP) t_emit32(vm, f->loop_pc - s);
     else { t_emit32(vm, f->patch); f->patch = s; }
 }
 static int t_fuse_branch(eccles_wasm_vm_t *vm, int invert);
+//emit a branch to the label at depth, a bit messy because of the keep/drop values (FIX)
+//TODO: clean up t_branch, too many special cases
 static void t_branch(eccles_wasm_vm_t *vm, uint32_t depth, int cond) {
     w_ctl_t *f; uint32_t keep; int fix;
     if (depth >= vm->tr.nctl) { t_bad(vm); return; }
@@ -383,11 +465,12 @@ static void t_branch(eccles_wasm_vm_t *vm, uint32_t depth, int cond) {
     t_target(vm, f);
     if (fix) { t_emit(vm, keep); t_emit(vm, f->base); }
 }
+//block types can be empty, a single valtype, or a type index (multi value)
 static int t_blocktype(eccles_wasm_vm_t *vm, uint8_t *np, uint8_t *nr) {
     int64_t v = rd_s64(vm);
     if (vm->err) return 0;
     if (v == -64) { *np = 0; *nr = 0; return 1; }
-    if (v == -16 || v == -17) { *np = 0; *nr = 1; return 1; }                      /* funcref / externref result */
+    if (v == -16 || v == -17) { *np = 0; *nr = 1; return 1; }  //funcref / externref result
     if (v >= -4 && v <= -1) {
         if (!w_valtype_ok((int)(v + 0x80))) { w_fail(vm, ECCLES_WASM_ERR_UNSUPPORTED_FEATURE, (uint32_t)(v + 0x80)); return 0; }
         *np = 0; *nr = 1; return 1;
@@ -410,11 +493,11 @@ static int t_unary(uint32_t op) {
 }
 
 
-/* ---- peephole fusion (see the fused-instruction notes at the top of the file) ---- */
+//peephole fusion (see the fused-instruction notes at the top of the file)
 static void t_barrier(eccles_wasm_vm_t *vm) { vm->tr.nh = 0; vm->tr.lkind = 0; }
 static void t_hist_push(eccles_wasm_vm_t *vm, uint8_t kind, uint32_t val, uint32_t pos) {
     w_trans_t *t = &vm->tr;
-    if (t->nh >= 1 && t->hend[t->nh - 1] == pos) {                 /* contiguous with the previous one */
+    if (t->nh >= 1 && t->hend[t->nh - 1] == pos) {  //contiguous with the previous one
         if (t->nh == 2) { t->hpos[0] = t->hpos[1]; t->hend[0] = t->hend[1]; t->hkind[0] = t->hkind[1]; t->hval[0] = t->hval[1]; }
         else t->nh = 2;
         t->hpos[1] = pos; t->hend[1] = t->n; t->hkind[1] = kind; t->hval[1] = val;
@@ -423,7 +506,7 @@ static void t_hist_push(eccles_wasm_vm_t *vm, uint8_t kind, uint32_t val, uint32
 }
 static int t_hist_top(const w_trans_t *t, uint8_t kind) { return t->nh >= 1 && t->hend[t->nh - 1] == t->n && t->hkind[t->nh - 1] == kind; }
 
-static void t_emit_bin(eccles_wasm_vm_t *vm, uint32_t op, int idx) {     /* an i32 ALU/compare op, fused if possible */
+static void t_emit_bin(eccles_wasm_vm_t *vm, uint32_t op, int idx) {  //an i32 ALU/compare op, fused if possible
     w_trans_t *t = &vm->tr; int cmp = idx >= W_NALU; uint32_t pos = t->n;
     if (t->nh == 2 && t->hend[1] == t->n && t->hend[0] == t->hpos[1]) {
         if (t->hkind[0] == HK_LGET && t->hkind[1] == HK_LGET) {
@@ -451,7 +534,7 @@ static void t_emit_bin(eccles_wasm_vm_t *vm, uint32_t op, int idx) {     /* an i
     t->lpos = pos; t->lend = t->n; t->lkind = cmp ? LK_CMP_SS : 0; t->lidx = (uint8_t)idx; t->nh = 0;
 }
 
-/* compare (+ optionally inverted) folded into the conditional branch that follows it */
+//compare (+ optionally inverted) folded into the conditional branch that follows it
 static int t_fuse_branch(eccles_wasm_vm_t *vm, int invert) {
     static const uint8_t inv[10] = {1, 0, 8, 9, 6, 7, 4, 5, 2, 3};
     w_trans_t *t = &vm->tr; uint32_t pos, a = 0, c0 = 0, c1 = 0; int ci, variant;
@@ -469,7 +552,7 @@ static int t_fuse_branch(eccles_wasm_vm_t *vm, int invert) {
     return 1;
 }
 
-/* local.set: fold with the producer if we can */
+//local.set: fold with the producer if we can
 static void t_emit_set(eccles_wasm_vm_t *vm, uint32_t dst) {
     w_trans_t *t = &vm->tr; uint32_t pos;
     if (t->lend == t->n && (t->lkind == LK_ALU_LL || t->lkind == LK_ALU_LC)) {
@@ -492,6 +575,8 @@ static void t_emit_set(eccles_wasm_vm_t *vm, uint32_t dst) {
     t_emit(vm, 0x21); t_emit(vm, dst); t->lkind = 0; t->nh = 0;
 }
 
+//the translator: reads ONE function body from the stream and converts it to our internal 16bit code
+//this is the biggest function in the file, i know. every wasm opcode has its own case
 static void w_translate(eccles_wasm_vm_t *vm, uint32_t fi, uint32_t body_end) {
     w_func_t *F = &vm->funcs[fi];
     uint32_t nl, i, extra = 0;
@@ -545,7 +630,7 @@ static void w_translate(eccles_wasm_vm_t *vm, uint32_t fi, uint32_t body_end) {
                 c->else_slot = vm->tr.n; t_emit32(vm, 0); t_barrier(vm);
             }
             break; }
-        case 0x05: {                                              /* else */
+        case 0x05: {  //else
             w_ctl_t *f;
             if (vm->tr.dead && vm->tr.dead_depth) break;
             t_barrier(vm);
@@ -558,7 +643,7 @@ static void w_translate(eccles_wasm_vm_t *vm, uint32_t fi, uint32_t body_end) {
             t_put32(vm, f->else_slot, vm->tr.n - f->else_slot);
             f->kind = K_ELSE; vm->tr.h = (uint32_t)f->base + f->np; vm->tr.dead = 0;
             break; }
-        case 0x0B: {                                              /* end */
+        case 0x0B: {  //end
             w_ctl_t *f;
             if (vm->tr.dead && vm->tr.dead_depth) { vm->tr.dead_depth--; break; }
             t_barrier(vm);
@@ -581,7 +666,7 @@ static void w_translate(eccles_wasm_vm_t *vm, uint32_t fi, uint32_t body_end) {
             break; }
         case 0x0C: { uint32_t d = rd_u32(vm); if (vm->tr.dead) break; t_branch(vm, d, 0); vm->tr.dead = 1; vm->tr.dead_depth = 0; break; }
         case 0x0D: { uint32_t d = rd_u32(vm); if (vm->tr.dead) break; t_pop(vm, 1); if (!vm->err) t_branch(vm, d, 1); break; }
-        case 0x0E: {                                              /* br_table */
+        case 0x0E: {  //br_table
             uint32_t n = rd_u32(vm), k;
             if (vm->err) return;
             if (n >= 0xFFFFu) { w_fail(vm, ECCLES_WASM_ERR_LIMIT, n); return; }
@@ -610,7 +695,7 @@ static void w_translate(eccles_wasm_vm_t *vm, uint32_t fi, uint32_t body_end) {
             t_pop(vm, vm->funcs[idx].nparams); t_push(vm, vm->funcs[idx].nresults);
             t_emit(vm, 0x10); t_emit(vm, idx);
             break; }
-        case 0x11: case 0x13: {                                    /* call_indirect / return_call_indirect */
+        case 0x11: case 0x13: {  //call_indirect / return_call_indirect
             uint32_t ti = rd_u32(vm), tab = rd_u32(vm);
             if (vm->err) return;
             if (vm->tr.dead) break;
@@ -619,7 +704,7 @@ static void w_translate(eccles_wasm_vm_t *vm, uint32_t fi, uint32_t body_end) {
             t_emit(vm, op == 0x11 ? 0x11u : (uint32_t)OP_RETCALL_IND); t_emit(vm, vm->type_canon[ti]); t_emit(vm, tab);
             if (op == 0x13) { vm->tr.dead = 1; vm->tr.dead_depth = 0; }
             break; }
-        case 0x12: {                                               /* return_call */
+        case 0x12: {  //return_call
             uint32_t idx = rd_u32(vm);
             if (vm->tr.dead) break;
             if (idx >= vm->nfuncs) { t_bad(vm); return; }
@@ -627,16 +712,16 @@ static void w_translate(eccles_wasm_vm_t *vm, uint32_t fi, uint32_t body_end) {
             t_emit(vm, OP_RETCALL); t_emit(vm, idx);
             vm->tr.dead = 1; vm->tr.dead_depth = 0;
             break; }
-        case 0x25: case 0x26: {                                    /* table.get / table.set */
+        case 0x25: case 0x26: {  //table.get / table.set
             uint32_t ti = rd_u32(vm);
             if (vm->tr.dead) break;
             if (ti >= vm->ntables) { t_bad(vm); return; }
             if (op == 0x25) { t_pop(vm, 1); t_push(vm, 1); } else t_pop(vm, 2);
             t_emit(vm, op); t_emit(vm, ti);
             break; }
-        case 0xD0: (void)rd_u8(vm); if (!vm->tr.dead) { t_push(vm, 1); t_emit(vm, 0x41); t_emit32(vm, 0); } break;   /* ref.null */
-        case 0xD1: if (!vm->tr.dead) { t_pop(vm, 1); t_push(vm, 1); t_emit(vm, 0x50); } break;                      /* ref.is_null == i64.eqz */
-        case 0xD2: {                                               /* ref.func */
+        case 0xD0: (void)rd_u8(vm); if (!vm->tr.dead) { t_push(vm, 1); t_emit(vm, 0x41); t_emit32(vm, 0); } break;  //ref.null
+        case 0xD1: if (!vm->tr.dead) { t_pop(vm, 1); t_push(vm, 1); t_emit(vm, 0x50); } break;  //ref.is_null == i64.eqz
+        case 0xD2: {  //ref.func
             uint32_t idx = rd_u32(vm);
             if (vm->tr.dead) break;
             if (idx >= vm->nfuncs) { t_bad(vm); return; }
@@ -644,7 +729,7 @@ static void w_translate(eccles_wasm_vm_t *vm, uint32_t fi, uint32_t body_end) {
             break; }
         case 0x1A: if (!vm->tr.dead) { t_pop(vm, 1); t_emit(vm, 0x1A); } break;
         case 0x1C: { uint32_t n = rd_u32(vm), k; for (k = 0; k < n && !vm->err; k++) (void)w_vt(vm); }
-            /* fall through */
+            //fall through
         case 0x1B: if (!vm->tr.dead) { t_pop(vm, 3); t_push(vm, 1); t_emit(vm, 0x1B); } break;
         case 0x20: case 0x21: case 0x22: {
             uint32_t idx = rd_u32(vm);
@@ -676,6 +761,33 @@ static void w_translate(eccles_wasm_vm_t *vm, uint32_t fi, uint32_t body_end) {
         case 0x43: { uint32_t v = (uint32_t)rd_le(vm, 4); if (vm->tr.dead) break; t_push(vm, 1); t_emit(vm, 0x43); t_emit32(vm, v); break; }
         case 0x44: { uint64_t v = rd_le(vm, 8); if (vm->tr.dead) break; t_push(vm, 1); t_emit(vm, 0x44); t_emit32(vm, (uint32_t)v); t_emit32(vm, (uint32_t)(v >> 32)); break; }
 #endif
+#if ECCLES_WASM_ATOMICS
+        case 0xFE: {  //threads proposal: atomics
+            static const uint8_t asz[7] = {4, 8, 1, 2, 1, 2, 4};
+            uint32_t sub = rd_u32(vm), al, off, sz, pops, push, lg;
+            if (vm->err) return;
+            if (sub == 0x03) {  //atomic.fence
+                if (rd_u8(vm) != 0) { t_bad(vm); return; }
+                if (!vm->tr.dead) { t_emit(vm, OP_ATOMIC); t_emit(vm, sub); t_emit32(vm, 0); }
+                break;
+            }
+            al = rd_u32(vm); off = rd_u32(vm);
+            if (vm->err) return;
+            if (sub == 0x00) { sz = 4; pops = 2; push = 1; }  //memory.atomic.notify
+            else if (sub == 0x01) { sz = 4; pops = 3; push = 1; }  //memory.atomic.wait32
+            else if (sub == 0x02) { sz = 8; pops = 3; push = 1; }  //memory.atomic.wait64
+            else if (sub >= 0x10 && sub <= 0x16) { sz = asz[sub - 0x10]; pops = 1; push = 1; }
+            else if (sub >= 0x17 && sub <= 0x1D) { sz = asz[sub - 0x17]; pops = 2; push = 0; }
+            else if (sub >= 0x1E && sub <= 0x47) { sz = asz[(sub - 0x1E) % 7]; pops = 2; push = 1; }
+            else if (sub >= 0x48 && sub <= 0x4E) { sz = asz[sub - 0x48]; pops = 3; push = 1; }
+            else { w_fail(vm, ECCLES_WASM_ERR_UNSUPPORTED_FEATURE, 0xFE00u | sub); return; }
+            lg = sz == 1 ? 0u : sz == 2 ? 1u : sz == 4 ? 2u : 3u;
+            if (al != lg || !vm->has_mem) { t_bad(vm); return; }  //atomics must be naturally aligned
+            if (vm->tr.dead) break;
+            t_pop(vm, pops); if (push) t_push(vm, 1);
+            t_emit(vm, (sub == 0x01 || sub == 0x02) ? OP_AWAIT : OP_ATOMIC); t_emit(vm, sub); t_emit32(vm, off);
+            break; }
+#endif
         case 0xFC: {
             uint32_t sub = rd_u32(vm);
             if (vm->err) return;
@@ -696,18 +808,18 @@ static void w_translate(eccles_wasm_vm_t *vm, uint32_t fi, uint32_t body_end) {
                 if (vm->tr.dead) break;
                 if (!vm->has_mem) { t_bad(vm); return; }
                 t_pop(vm, 3); t_emit(vm, OP_MEMFILL);
-            } else if (sub >= 12 && sub <= 17) {                         /* table.init/elem.drop/copy/grow/size/fill */
+            } else if (sub >= 12 && sub <= 17) {  //table.init/elem.drop/copy/grow/size/fill
                 uint32_t a1 = rd_u32(vm), a2 = 0;
                 if (sub == 12 || sub == 14) a2 = rd_u32(vm);
                 if (vm->err) return;
                 if (vm->tr.dead) break;
-                if (sub == 12) {                                     /* a1 = elem segment, a2 = table */
+                if (sub == 12) {  //a1 = elem segment, a2 = table
                     if (a1 >= vm->neseg || a2 >= vm->ntables) { t_bad(vm); return; }
                     t_pop(vm, 3); t_emit(vm, OP_TABINIT); t_emit(vm, a1); t_emit(vm, a2);
                 } else if (sub == 13) {
                     if (a1 >= vm->neseg) { t_bad(vm); return; }
                     t_emit(vm, OP_ELEMDROP); t_emit(vm, a1);
-                } else if (sub == 14) {                              /* a1 = dst table, a2 = src table */
+                } else if (sub == 14) {  //a1 = dst table, a2 = src table
                     if (a1 >= vm->ntables || a2 >= vm->ntables) { t_bad(vm); return; }
                     t_pop(vm, 3); t_emit(vm, OP_TABCOPY); t_emit(vm, a1); t_emit(vm, a2);
                 } else {
@@ -717,13 +829,13 @@ static void w_translate(eccles_wasm_vm_t *vm, uint32_t fi, uint32_t body_end) {
                     else { t_pop(vm, 3); t_emit(vm, OP_TABFILL); }
                     t_emit(vm, a1);
                 }
-            } else if (sub == 8) {                                      /* memory.init dataidx 0 */
+            } else if (sub == 8) {  //memory.init dataidx 0
                 uint32_t di = rd_u32(vm);
                 if (rd_u8(vm) != 0) { t_bad(vm); return; }
                 if (vm->tr.dead) break;
                 if (!vm->has_mem || di >= vm->nseg) { t_bad(vm); return; }
                 t_pop(vm, 3); t_emit(vm, OP_MEMINIT); t_emit(vm, di);
-            } else if (sub == 9) {                                      /* data.drop dataidx */
+            } else if (sub == 9) {  //data.drop dataidx
                 uint32_t di = rd_u32(vm);
                 if (vm->tr.dead) break;
                 if (di >= vm->nseg) { t_bad(vm); return; }
@@ -753,7 +865,7 @@ static void w_translate(eccles_wasm_vm_t *vm, uint32_t fi, uint32_t body_end) {
                 if (t_unary(op)) { t_pop(vm, 1); t_push(vm, 1); } else { t_pop(vm, 2); t_push(vm, 1); }
                 { int fx = w_fuse_idx(op);
                   if (fx >= 0) t_emit_bin(vm, op, fx);
-                  else if (op < 0xBC || op > 0xBF) t_emit(vm, op);       /* reinterpret = no-op on raw slots */ }
+                  else if (op < 0xBC || op > 0xBF) t_emit(vm, op); }  //reinterpret is a no-op on raw slots
             } else { w_fail(vm, ECCLES_WASM_ERR_UNSUPPORTED_FEATURE, op); return; }
             break;
         }
@@ -766,8 +878,8 @@ static void w_translate(eccles_wasm_vm_t *vm, uint32_t fi, uint32_t body_end) {
     vm->code_bytes += vm->tr.n * 2u;
 }
 
-/* ---- constant expressions ---- */
-static uint64_t w_const_expr(eccles_wasm_vm_t *vm, uint32_t visible) {   /* incl. extended-const arithmetic */
+//constant expressions
+static uint64_t w_const_expr(eccles_wasm_vm_t *vm, uint32_t visible) {  //incl. extended-const arithmetic
     uint64_t st[8]; int n = 0;
     for (;;) {
         int op = rd_u8(vm);
@@ -782,7 +894,7 @@ static uint64_t w_const_expr(eccles_wasm_vm_t *vm, uint32_t visible) {   /* incl
         case 0x44: st[n++] = rd_le(vm, 8); break;
 #endif
         case 0x23: { uint32_t g = rd_u32(vm); if (g >= visible) { t_bad(vm); return 0; } st[n++] = vm->globals[g]; break; }
-        case 0xD0: (void)rd_u8(vm); st[n++] = 0; break;                                   /* ref.null */
+        case 0xD0: (void)rd_u8(vm); st[n++] = 0; break;  //ref.null
         case 0xD2: { uint32_t f = rd_u32(vm); if (f >= vm->nfuncs) { t_bad(vm); return 0; } st[n++] = (uint64_t)f + 1u; break; }
         case 0x6A: case 0x6B: case 0x6C: {
             uint32_t b, a; if (n < 2) { t_bad(vm); return 0; }
@@ -799,7 +911,9 @@ static uint64_t w_const_expr(eccles_wasm_vm_t *vm, uint32_t visible) {   /* incl
     return st[0];
 }
 
-/* ---- sections ---- */
+//sections
+//section 1, the function signatures. we store them as small records (np, nr, params, results) and merge the identical ones
+//so call_indirect can compare the type ids with a simple ==
 static void sec_type(eccles_wasm_vm_t *vm) {
     uint32_t n = rd_u32(vm), i, used = 0;
     uint8_t *pool;
@@ -832,8 +946,13 @@ static void sec_type(eccles_wasm_vm_t *vm) {
 
 static void w_alloc_mem(eccles_wasm_vm_t *vm, uint32_t flags, uint32_t mn) {
     uint64_t want;
-    if (vm->has_mem) { w_fail(vm, ECCLES_WASM_ERR_UNSUPPORTED_FEATURE, 0x3002u); return; }     /* multi-memory */
+    if (vm->has_mem) { w_fail(vm, ECCLES_WASM_ERR_UNSUPPORTED_FEATURE, 0x3002u); return; }  //multi-memory
+#if ECCLES_WASM_ATOMICS
+    if (flags > 1 && flags != 3) { w_fail(vm, ECCLES_WASM_ERR_UNSUPPORTED_FEATURE, 0x3100u | flags); return; }  //3 = shared (needs a maximum)
+    vm->mem_shared = (uint8_t)(flags == 3);
+#else
     if (flags > 1) { w_fail(vm, ECCLES_WASM_ERR_UNSUPPORTED_FEATURE, 0x3100u | flags); return; }
+#endif
     if (mn > 65536u) { t_bad(vm); return; }
     want = (uint64_t)mn * W_PAGE;
 #if defined(ECCLES_WASM_MEM_LIMIT_BYTES)
@@ -859,6 +978,8 @@ static int w_find_global(eccles_wasm_vm_t *vm, const char *name, uint64_t *v) {
     return 0;
 }
 
+//section 2, imports. functions are linked to your host functions or to our builtin tables (hardware + wasi)
+//imported memory/table/globals are allocated by us, the value of an imported global comes from eccles_wasm_vm_set_global()
 static void sec_import(eccles_wasm_vm_t *vm) {
     uint32_t n = rd_u32(vm), i, nf = 0;
     char name[ECCLES_WASM_MAX_NAME + 1];
@@ -872,7 +993,7 @@ static void sec_import(eccles_wasm_vm_t *vm) {
         fl = rd_name(vm, name, sizeof name);
         kind = rd_u8(vm);
         if (vm->err) return;
-        if (kind == 1) {                                        /* imported table: owned by this instance */
+        if (kind == 1) {  //imported table: owned by this instance
             int rt = rd_u8(vm); uint32_t flags, mn; w_table_t *tb;
             flags = rd_u32(vm); mn = rd_u32(vm); if (flags & 1) (void)rd_u32(vm);
             if (vm->err) return;
@@ -882,14 +1003,14 @@ static void sec_import(eccles_wasm_vm_t *vm) {
             w_alloc_table(vm, tb, flags, mn); vm->ntables++;
             continue;
         }
-        if (kind == 2) {                                        /* imported memory: allocated here, same as a defined one */
+        if (kind == 2) {  //imported memory: allocated here, same as a defined one
             uint32_t flags = rd_u32(vm), mn = rd_u32(vm);
             if (flags & 1) (void)rd_u32(vm);
             if (vm->err) return;
             w_alloc_mem(vm, flags, mn);
             continue;
         }
-        if (kind == 3) {                                        /* imported global: value from eccles_wasm_vm_set_global() or 0 */
+        if (kind == 3) {  //imported global: value from eccles_wasm_vm_set_global() or 0
             uint64_t v = 0;
             (void)w_vt(vm); (void)rd_u8(vm);
             if (vm->err) return;
@@ -926,6 +1047,7 @@ static void sec_import(eccles_wasm_vm_t *vm) {
     vm->nglobals = vm->nglobals_imp;
 }
 
+//section 3, just the type index of every function defined in the module
 static void sec_function(eccles_wasm_vm_t *vm) {
     uint32_t n = rd_u32(vm), i, total;
     w_func_t *nf;
@@ -947,6 +1069,7 @@ static void sec_function(eccles_wasm_vm_t *vm) {
     vm->nfuncs = (uint16_t)total;
 }
 
+//section 4, the table definitions
 static void sec_table(eccles_wasm_vm_t *vm) {
     uint32_t n = rd_u32(vm), i, total;
     w_table_t *nt;
@@ -967,6 +1090,7 @@ static void sec_table(eccles_wasm_vm_t *vm) {
     vm->tables = nt; vm->ntables = (uint16_t)total;
 }
 
+//section 5, linear memory. NOTE: with ECCLES_WASM_MEM_LIMIT_BYTES the guest still sees the real page count but we only back part of it
 static void sec_memory(eccles_wasm_vm_t *vm) {
     uint32_t n = rd_u32(vm), flags, mn;
     if (vm->err) return;
@@ -977,6 +1101,7 @@ static void sec_memory(eccles_wasm_vm_t *vm) {
     w_alloc_mem(vm, flags, mn);
 }
 
+//section 6, globals
 static void sec_global(eccles_wasm_vm_t *vm) {
     uint32_t n = rd_u32(vm), i, base = vm->nglobals_imp; uint64_t *ng;
     if (vm->err) return;
@@ -992,6 +1117,7 @@ static void sec_global(eccles_wasm_vm_t *vm) {
     vm->nglobals = (uint16_t)(n + base);
 }
 
+//section 7, exports. we keep the names so eccles_wasm_call can find them
 static void sec_export(eccles_wasm_vm_t *vm) {
     uint32_t n = rd_u32(vm), i;
     if (vm->err) return;
@@ -1013,6 +1139,7 @@ static void sec_export(eccles_wasm_vm_t *vm) {
     }
 }
 
+//section 8, the start function (runs at the end of loading when ECCLES_WASM_AUTORUN_START is on)
 static void sec_start(eccles_wasm_vm_t *vm) {
     uint32_t idx = rd_u32(vm);
     if (vm->err) return;
@@ -1020,7 +1147,7 @@ static void sec_start(eccles_wasm_vm_t *vm) {
     vm->start = (uint16_t)idx;
 }
 
-static void sec_element(eccles_wasm_vm_t *vm) {            /* all eight element-segment encodings */
+static void sec_element(eccles_wasm_vm_t *vm) {  //all eight element-segment encodings
     uint32_t n = rd_u32(vm), i;
     if (vm->err) return;
     if (n > 0xFFFEu) { w_fail(vm, ECCLES_WASM_ERR_LIMIT, n); return; }
@@ -1033,13 +1160,13 @@ static void sec_element(eccles_wasm_vm_t *vm) {            /* all eight element-
         if (vm->err) return;
         if (flags > 7) { w_fail(vm, ECCLES_WASM_ERR_UNSUPPORTED_FEATURE, 0x9000u | flags); return; }
         passive = (flags & 3) == 1; decl = (flags & 3) == 3; exprs = (flags & 4) != 0;
-        if (!(flags & 1)) {                                         /* active: [tableidx] offset */
+        if (!(flags & 1)) {  //active: [tableidx] offset
             if (flags & 2) tab = rd_u32(vm);
             off = (uint32_t)w_const_expr(vm, vm->nglobals);
             if (vm->err) return;
             if (tab >= vm->ntables) { t_bad(vm); return; }
         }
-        if (flags & 3) (void)rd_u8(vm);                              /* elemkind / reftype */
+        if (flags & 3) (void)rd_u8(vm);  //elemkind / reftype
         cnt = rd_u32(vm);
         if (vm->err) return;
         if (!(flags & 1) && (uint64_t)off + cnt > vm->tables[tab].size) { t_bad(vm); return; }
@@ -1055,6 +1182,7 @@ static void sec_element(eccles_wasm_vm_t *vm) {            /* all eight element-
     }
 }
 
+//section 10, the function bodies. every body goes to w_translate
 static void sec_code(eccles_wasm_vm_t *vm) {
     uint32_t n = rd_u32(vm), i;
     if (vm->err) return;
@@ -1063,6 +1191,7 @@ static void sec_code(eccles_wasm_vm_t *vm) {
     for (i = 0; i < n && !vm->err; i++) {
         uint32_t size = rd_u32(vm), end;
         if (vm->err) return;
+        if (size > 0xFFFFFFFFu - rd_pos(vm)) { t_bad(vm); return; }  //offsets are 32-bit: refuse a size that would wrap
         end = rd_pos(vm) + size;
         w_translate(vm, (uint32_t)vm->nimports + i, end);
     }
@@ -1077,19 +1206,21 @@ static int w_alloc_segs(eccles_wasm_vm_t *vm, uint32_t n) {
     vm->nseg = (uint16_t)n;
     return 1;
 }
+//section 12, the data count. sec_data checks that it agrees with the number of data segments
 static void sec_datacount(eccles_wasm_vm_t *vm) {
     uint32_t n = rd_u32(vm);
     if (!vm->err && n) (void)w_alloc_segs(vm, n);
 }
 
+//section 11, active segments are copied straight into linear memory, passive ones are kept for memory.init
 static void sec_data(eccles_wasm_vm_t *vm) {
     uint32_t n = rd_u32(vm), i;
     if (vm->err) return;
-    if (vm->nseg && n != vm->nseg) { t_bad(vm); return; }              /* must agree with the data count section */
+    if (vm->nseg && n != vm->nseg) { t_bad(vm); return; }  //must agree with the data count section
     for (i = 0; i < n && !vm->err; i++) {
         uint32_t flags = rd_u32(vm), off, len; uint64_t e;
         if (vm->err) return;
-        if (flags == 1) {                                         /* passive: keep the bytes for memory.init */
+        if (flags == 1) {  //passive: keep the bytes for memory.init
             uint8_t *dst;
             len = rd_u32(vm);
             if (vm->err) return;
@@ -1116,6 +1247,8 @@ static void sec_data(eccles_wasm_vm_t *vm) {
     }
 }
 
+//the main loader loop. checks the magic number then walks all the sections
+//sections must come in the correct order (rank) except custom sections, those we skip
 static void w_load_module(eccles_wasm_vm_t *vm) {
     uint8_t hdr[8]; int last = 0, rank;
     static const uint8_t magic[8] = {0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00};
@@ -1125,9 +1258,10 @@ static void w_load_module(eccles_wasm_vm_t *vm) {
     if (memcmp(hdr, magic, 8) != 0) { t_bad(vm); return; }
     for (;;) {
         uint32_t id, size, end;
-        if (vm->rd.p >= vm->rd.e && !rd_fill(vm)) break;                 /* clean EOF between sections */
+        if (vm->rd.p >= vm->rd.e && !rd_fill(vm)) break;  //clean EOF between sections
         id = (uint32_t)rd_u8(vm); size = rd_u32(vm);
         if (vm->err) return;
+        if (size > 0xFFFFFFFFu - rd_pos(vm)) { t_bad(vm); return; }
         end = rd_pos(vm) + size;
         if (id == 0) { rd_skip(vm, size); if (vm->err) return; continue; }
         switch (id) {
@@ -1153,9 +1287,7 @@ static void w_load_module(eccles_wasm_vm_t *vm) {
     if (vm->nfuncs > vm->nimports && !vm->code_seen) { t_bad(vm); return; }
 }
 
-/* ===================================================================== *
- *  4. interpreter
- * ===================================================================== */
+//4. interpreter
 
 #if (ECCLES_WASM_YIELD_INTERVAL) != 0 && !defined(ECCLES_WASM_YIELD)
   #error "eccles_wasm: ECCLES_WASM_YIELD_INTERVAL is set but ECCLES_WASM_YIELD() is not defined."
@@ -1171,6 +1303,7 @@ static void w_load_module(eccles_wasm_vm_t *vm) {
   #define le64(v) (v)
 #endif
 
+//clz / ctz / popcnt, uses the compiler builtin when there is one, otherwise a plain c version
 static uint32_t w_clz32(uint32_t x) {
     if (!x) return 32;
 #if defined(__GNUC__) || defined(__clang__)
@@ -1198,6 +1331,7 @@ static uint32_t w_ctz64(uint64_t x) { return (uint32_t)x ? w_ctz32((uint32_t)x) 
 static uint32_t w_pop64(uint64_t x) { return w_pop32((uint32_t)x) + w_pop32((uint32_t)(x >> 32)); }
 
 #if !defined(ECCLES_WASM_NO_FLOAT)
+//float <-> bits with memcpy, casting the pointer is undefined behaviour and gcc -O2 really breaks it
 static uint32_t fb32(float f)    { uint32_t u; memcpy(&u, &f, 4); return u; }
 static float    bf32(uint32_t u) { float f; memcpy(&f, &u, 4); return f; }
 static uint64_t fb64(double f)   { uint64_t u; memcpy(&u, &f, 8); return u; }
@@ -1205,6 +1339,7 @@ static double   bf64(uint64_t u) { double f; memcpy(&f, &u, 8); return f; }
 
 static float f32_zero_like(float x) { return (fb32(x) & 0x80000000u) ? bf32(0x80000000u) : 0.0f; }
 static double f64_zero_like(double x) { return (fb64(x) >> 63) ? bf64((uint64_t)1 << 63) : 0.0; }
+//we write our own trunc/floor/ceil/nearest because i dont want to link the whole libm on small chips (only sqrt comes from math.h)
 static float f32_trunc(float x) {
     float t; if (!(x > -8388608.0f && x < 8388608.0f)) return x;
     t = (float)(int32_t)x; return t == 0.0f ? f32_zero_like(x) : t;
@@ -1241,6 +1376,7 @@ static double f64_nearest(double x) {
     t = x < 0 ? -x : x; v = t + 4503599627370496.0; t = v - 4503599627370496.0;
     return bf64((fb64(t) & 0x7FFFFFFFFFFFFFFFull) | (fb64(x) & 0x8000000000000000ull));
 }
+//wasm min/max have special rules for nan and -0, the c fmin/fmax are not the same thing
 static float f32_min(float a, float b) {
     if (a != a) return a;
     if (b != b) return b;
@@ -1268,14 +1404,14 @@ static double f64_max(double a, double b) {
 #endif
 
 #define W_NOPS 0x290
-typedef char w_nops_check[(W_FUSED_END <= W_NOPS) ? 1 : -1];   /* the dispatch table must cover every fused op */
+typedef char w_nops_check[(W_FUSED_END <= W_NOPS) ? 1 : -1];  //the dispatch table must cover every fused op
 #define W_TBL(n, o, e)  [FLL_##n] = &&L_FLL_##n, [FLC_##n] = &&L_FLC_##n, [FSC_##n] = &&L_FSC_##n, [FSL_##n] = &&L_FSL_##n,
 #define W_TBLS(n, o, e) [FLLS_##n] = &&L_FLLS_##n, [FLCS_##n] = &&L_FLCS_##n,
 #define W_TBLB(n, o, e) [BSS_##n] = &&L_BSS_##n, [BLC_##n] = &&L_BLC_##n, [BLL_##n] = &&L_BLL_##n,
 #define W_FUSED_TABLE W_FUSE_LIST(W_TBL) W_ALU_LIST(W_TBLS) W_CMP_LIST(W_TBLB) \
     [OP_MOVE] = &&L_OP_MOVE, [OP_SETC] = &&L_OP_SETC, [OP_LLD32] = &&L_OP_LLD32, [OP_LLD8U] = &&L_OP_LLD8U,
-/* Dispatch: computed goto (GCC/Clang "labels as values") is selected automatically; define
-   ECCLES_WASM_NO_COMPUTED_GOTO to force a portable switch. Both run the same handler bodies. */
+//dispatch: computed goto (gcc/clang labels as values) is picked automatically, define ECCLES_WASM_NO_COMPUTED_GOTO to force a plain switch
+//both of them run the same handler bodies
 #if (defined(__GNUC__) || defined(__clang__)) && !defined(ECCLES_WASM_NO_COMPUTED_GOTO)
   #define W_CG 1
   #define CASE(x)       L_##x:
@@ -1301,10 +1437,14 @@ typedef char w_nops_check[(W_FUSED_END <= W_NOPS) ? 1 : -1];   /* the dispatch t
   #define TICK() ((void)0)
 #endif
 
+//TRAP jumps to the trap label at the bottom with the error code
 #define TRAP(e)   do { err = (e); goto trap; } while (0)
+//read immediates from the translated code (pc is a pointer to 16bit words)
 #define IMM16()   (*pc++)
 #define IMM32()   (pc += 2, (uint32_t)pc[-2] | ((uint32_t)pc[-1] << 16))
 #define OFF32(p)  ((int32_t)((uint32_t)(p)[0] | ((uint32_t)(p)[1] << 16)))
+//helper macros for binary/unary ops, i got tired of writing the same pop pop push 200 times
+//they contain NEXT so they only work directly inside a handler
 #define BIN32(E)  { uint32_t b = (uint32_t)sp[-1], a = (uint32_t)sp[-2]; sp--; sp[-1] = (uint32_t)(E); NEXT; }
 #define BIN64(E)  { uint64_t b = sp[-1], a = sp[-2]; sp--; sp[-1] = (uint64_t)(E); NEXT; }
 #define UN32(E)   { uint32_t a = (uint32_t)sp[-1]; sp[-1] = (uint32_t)(E); NEXT; }
@@ -1315,19 +1455,66 @@ typedef char w_nops_check[(W_FUSED_END <= W_NOPS) ? 1 : -1];   /* the dispatch t
 #define FBIN64(E) { double b = bf64(sp[-1]), a = bf64(sp[-2]); sp--; sp[-1] = fb64(E); NEXT; }
 #define FCMP64(E) { double b = bf64(sp[-1]), a = bf64(sp[-2]); sp--; sp[-1] = (E) ? 1u : 0u; NEXT; }
 #define FUN64(E)  { double a = bf64(sp[-1]); sp[-1] = fb64(E); NEXT; }
+//memory access macros, ea is the effective address (base + offset), everything is checked against memsz
+//so a bad guest cant touch our own memory
 #define MEMOFF(n) uint32_t off_ = IMM32(); uint64_t ea = (uint64_t)(uint32_t)sp[-1] + off_; \
                   if (W_UNLIKELY(ea + (n) > memsz)) TRAP(ECCLES_WASM_TRAP_MEM_OOB)
 #define STOREP(n) uint32_t off_ = IMM32(); uint64_t val = sp[-1]; uint64_t ea = (uint64_t)(uint32_t)sp[-2] + off_; \
                   sp -= 2; if (W_UNLIKELY(ea + (n) > memsz)) TRAP(ECCLES_WASM_TRAP_MEM_OOB)
+//FIX moves the kept values down to the block base when a branch leaves a block that has extra values on the stack
 #define FIX(keep, nb) { uint64_t *d_ = fp + (nb), *s_ = sp - (keep); \
                   if (d_ != s_) { uint32_t k_; for (k_ = 0; k_ < (keep); k_++) d_[k_] = s_[k_]; } sp = d_ + (keep); }
+
+#if ECCLES_WASM_ATOMICS
+#if ECCLES_WASM_BIG_ENDIAN
+  #error "eccles_wasm: ECCLES_WASM_ATOMICS needs a little-endian host."
+#endif
+#if !(defined(__GNUC__) || defined(__clang__))
+  #error "eccles_wasm: ECCLES_WASM_ATOMICS needs the GCC/Clang __atomic builtins."
+#endif
+//one atomic instruction that never blocks, the operands are on the value stack and everything is sequentially consistent like the spec says
+static eccles_wasm_error_t w_atomic_op(eccles_wasm_vm_t *vm, uint32_t sub, uint32_t off, uint64_t **spp) {
+    static const uint8_t asz[7] = {4, 8, 1, 2, 1, 2, 4};
+    uint64_t *sp = *spp, ea, val = 0, cmp = 0, res = 0; uint32_t size = 4, op = 0, k = 0; int kind;  //kind: 0 load 1 store 2 rmw 3 cmpxchg 4 notify
+    uint8_t *p;
+    if (sub == 0x03) { __atomic_thread_fence(__ATOMIC_SEQ_CST); return ECCLES_WASM_OK; }
+    if (sub == 0x00) { kind = 4; ea = (uint64_t)(uint32_t)sp[-2] + off; sp -= 1; }
+    else if (sub <= 0x16) { kind = 0; k = sub - 0x10; size = asz[k]; ea = (uint64_t)(uint32_t)sp[-1] + off; }
+    else if (sub <= 0x1D) { kind = 1; k = sub - 0x17; size = asz[k]; val = sp[-1]; ea = (uint64_t)(uint32_t)sp[-2] + off; sp -= 2; }
+    else if (sub <= 0x47) { kind = 2; op = (sub - 0x1E) / 7u; k = (sub - 0x1E) % 7u; size = asz[k]; val = sp[-1]; ea = (uint64_t)(uint32_t)sp[-2] + off; sp -= 1; }
+    else { kind = 3; k = sub - 0x48; size = asz[k]; val = sp[-1]; cmp = sp[-2]; ea = (uint64_t)(uint32_t)sp[-3] + off; sp -= 2; }
+    if (ea + size > vm->mem_bytes) return ECCLES_WASM_TRAP_MEM_OOB;
+    if (ea & (size - 1u)) return ECCLES_WASM_TRAP_ATOMIC;
+    p = vm->mem + ea;
+    if (kind == 4) { sp[-1] = 0; *spp = sp; return ECCLES_WASM_OK; }  //notify: waiters poll, so none are counted as woken
+#define A_CASE(T, B) case B: { T *q = (T *)(void *)p; T v = (T)val, e = (T)cmp, r; \
+        if (kind == 0) r = __atomic_load_n(q, __ATOMIC_SEQ_CST); \
+        else if (kind == 1) { __atomic_store_n(q, v, __ATOMIC_SEQ_CST); r = 0; } \
+        else if (kind == 3) { __atomic_compare_exchange_n(q, &e, v, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); r = e; } \
+        else switch (op) { \
+            case 0: r = __atomic_fetch_add(q, v, __ATOMIC_SEQ_CST); break; \
+            case 1: r = __atomic_fetch_sub(q, v, __ATOMIC_SEQ_CST); break; \
+            case 2: r = __atomic_fetch_and(q, v, __ATOMIC_SEQ_CST); break; \
+            case 3: r = __atomic_fetch_or(q, v, __ATOMIC_SEQ_CST); break; \
+            case 4: r = __atomic_fetch_xor(q, v, __ATOMIC_SEQ_CST); break; \
+            default: r = __atomic_exchange_n(q, v, __ATOMIC_SEQ_CST); break; } \
+        res = (uint64_t)r; break; }
+    switch (size) { A_CASE(uint8_t, 1) A_CASE(uint16_t, 2) A_CASE(uint32_t, 4) A_CASE(uint64_t, 8) default: break; }
+#undef A_CASE
+    if (kind != 1) sp[-1] = res;  //loads / rmw / cmpxchg leave their result
+    *spp = sp;
+    return ECCLES_WASM_OK;
+}
+#endif
 
 #if W_CG && defined(__GNUC__)
   #pragma GCC diagnostic push
   #pragma GCC diagnostic ignored "-Wpedantic"
   #pragma GCC diagnostic ignored "-Woverride-init"
 #endif
-static eccles_wasm_error_t w_exec(eccles_wasm_vm_t *vm, const w_func_t *f0) {
+//the interpreter. one big dispatch loop, every opcode has a handler
+//with ECCLES_WASM_EXEC_IRAM this function (and on esp32 the dispatch table) goes to internal ram
+static W_EXEC_ATTR eccles_wasm_error_t w_exec(eccles_wasm_vm_t *vm, const w_func_t *f0) {
     const w_func_t *const funcs = vm->funcs;
     const w_func_t *cur, *f;
     const uint16_t *pc;
@@ -1345,14 +1532,14 @@ static eccles_wasm_error_t w_exec(eccles_wasm_vm_t *vm, const w_func_t *f0) {
   #endif
 #endif
 
-    fp = vm->stk;
-    if (fp + f0->max_h > stk_end) return ECCLES_WASM_TRAP_STACK_OVERFLOW;
+    fp = vm->stk; //value stack starts at the bottom of vm->stk
+    if (fp + f0->max_h > stk_end) return ECCLES_WASM_TRAP_STACK_OVERFLOW; //the first function doesnt even fit
     sp = fp + f0->nparams;
     { uint64_t *ze = fp + f0->nparams + f0->nlocals; while (sp < ze) *sp++ = 0; }
     cur = f0; pc = f0->code;
 
 #if W_CG
-    static const void *const disp[W_NOPS] = {
+    static W_EXEC_DATA const void *const disp[W_NOPS] = {
         [0 ... W_NOPS - 1] = &&L_default,
         /* BEGIN GENERATED DISPATCH (python3 tests/gen_dispatch.py) */
         [0x00] = &&L_0x00,
@@ -1411,6 +1598,10 @@ static eccles_wasm_error_t w_exec(eccles_wasm_vm_t *vm, const w_func_t *f0) {
         [OP_MEMFILL] = &&L_OP_MEMFILL,
         [OP_MEMINIT] = &&L_OP_MEMINIT,
         [OP_DATADROP] = &&L_OP_DATADROP,
+#if ECCLES_WASM_ATOMICS
+        [OP_ATOMIC] = &&L_OP_ATOMIC,
+        [OP_AWAIT] = &&L_OP_AWAIT,
+#endif
         [0x41] = &&L_0x41,
         [0x43] = &&L_0x43,
         [0x42] = &&L_0x42,
@@ -1561,13 +1752,14 @@ static eccles_wasm_error_t w_exec(eccles_wasm_vm_t *vm, const w_func_t *f0) {
         W_FUSED_TABLE
     };
     NEXT;
-    {
+    {  //this block just gives the computed goto labels one common scope
+    //every handler ends with NEXT or TRAP so we never fall out of it
 #else
     for (;;) {
         switch (*pc++) {
 #endif
         CASE(0x00) TRAP(ECCLES_WASM_TRAP_UNREACHABLE);
-        /* ---- control ---- */
+        //control
         CASE(OP_BR)     { int32_t o = OFF32(pc); if (o < 0) TICK(); pc += o; NEXT; }
         CASE(OP_BR_FIX) { const uint16_t *s = pc; int32_t o = OFF32(s); uint32_t keep = s[2], nb = s[3];
                           FIX(keep, nb) if (o < 0) TICK(); pc = s + o; NEXT; }
@@ -1584,7 +1776,7 @@ static eccles_wasm_error_t w_exec(eccles_wasm_vm_t *vm, const w_func_t *f0) {
             if (idx > n) idx = n;
             e = pc + 1 + idx * 4u; o = OFF32(e); keep = e[2]; nb = e[3];
             FIX(keep, nb) if (o < 0) TICK(); pc = e + o; NEXT; }
-        CASE(0x0F) do_return: {                                     /* return / function end */
+        CASE(0x0F) do_return: {  //return / function end
             uint32_t nr = cur->nresults, k; uint64_t *src = sp - nr;
             for (k = 0; k < nr; k++) fp[k] = src[k];
             sp = fp + nr;
@@ -1609,7 +1801,7 @@ static eccles_wasm_error_t w_exec(eccles_wasm_vm_t *vm, const w_func_t *f0) {
             f = &funcs[e - 1];
             if (f->type != ti) TRAP(ECCLES_WASM_TRAP_INDIRECT_TYPE);
             goto do_tailcall; }
-        /* ---- reference types / tables ---- */
+        //reference types / tables
         CASE(0x25) { const w_table_t *t = &vm->tables[IMM16()]; uint32_t i = (uint32_t)sp[-1];
             if (i >= t->size) TRAP(ECCLES_WASM_TRAP_TABLE_OOB);
             sp[-1] = t->elems[i]; NEXT; }
@@ -1617,7 +1809,7 @@ static eccles_wasm_error_t w_exec(eccles_wasm_vm_t *vm, const w_func_t *f0) {
             if (i >= t->size) TRAP(ECCLES_WASM_TRAP_TABLE_OOB);
             t->elems[i] = (uint32_t)sp[-1]; sp -= 2; NEXT; }
         CASE(OP_TABSIZE) *sp++ = vm->tables[IMM16()].size; NEXT;
-        CASE(OP_TABGROW) { uint32_t ti = IMM16(), n = (uint32_t)sp[-1]; sp--; sp[-1] = (n == 0) ? vm->tables[ti].size : 0xFFFFFFFFu; NEXT; }   /* growth always fails (spec-legal) */
+        CASE(OP_TABGROW) { uint32_t ti = IMM16(), n = (uint32_t)sp[-1]; sp--; sp[-1] = (n == 0) ? vm->tables[ti].size : 0xFFFFFFFFu; NEXT; }  //growth always fails (spec-legal)
         CASE(OP_TABFILL) { w_table_t *t = &vm->tables[IMM16()]; uint64_t d = (uint32_t)sp[-3], n = (uint32_t)sp[-1], k; uint32_t v = (uint32_t)sp[-2];
             sp -= 3; if (d + n > t->size) TRAP(ECCLES_WASM_TRAP_TABLE_OOB);
             for (k = 0; k < n; k++) t->elems[d + k] = v;
@@ -1635,13 +1827,13 @@ static eccles_wasm_error_t w_exec(eccles_wasm_vm_t *vm, const w_func_t *f0) {
         CASE(OP_ELEMDROP) vm->eseg[IMM16()].len = 0; NEXT;
         CASE(0x1A) sp--; NEXT;
         CASE(0x1B) { uint32_t c = (uint32_t)sp[-1]; sp -= 2; if (!c) sp[-1] = sp[0]; NEXT; }
-        /* ---- variables ---- */
+        //variables
         CASE(0x20) *sp++ = fp[IMM16()]; NEXT;
         CASE(0x21) fp[IMM16()] = *--sp; NEXT;
         CASE(0x22) fp[IMM16()] = sp[-1]; NEXT;
         CASE(0x23) *sp++ = vm->globals[IMM16()]; NEXT;
         CASE(0x24) vm->globals[IMM16()] = *--sp; NEXT;
-        /* ---- memory ---- */
+        //memory
         CASE(0x28) CASE(0x2A) { MEMOFF(4); uint32_t v; memcpy(&v, mem + ea, 4); sp[-1] = le32(v); NEXT; }
         CASE(0x29) CASE(0x2B) { MEMOFF(8); uint64_t v; memcpy(&v, mem + ea, 8); sp[-1] = le64(v); NEXT; }
         CASE(0x2C) { MEMOFF(1); sp[-1] = (uint32_t)(int32_t)(int8_t)mem[ea]; NEXT; }
@@ -1677,10 +1869,37 @@ static eccles_wasm_error_t w_exec(eccles_wasm_vm_t *vm, const w_func_t *f0) {
             if (n) memcpy(mem + d, vm->segs[di].p + so, (size_t)n);
             NEXT; }
         CASE(OP_DATADROP) vm->segs[IMM16()].len = 0; NEXT;
-        /* ---- constants ---- */
+#if ECCLES_WASM_ATOMICS
+        CASE(OP_ATOMIC) { uint32_t sub = IMM16(), off = IMM32(); eccles_wasm_error_t ae = w_atomic_op(vm, sub, off, &sp);
+            if (ae != ECCLES_WASM_OK) TRAP(ae);
+            NEXT; }
+        CASE(OP_AWAIT) {  //memory.atomic.wait32/64: polling wait (no waiter queue)
+            uint32_t sub = IMM16(), off = IMM32(), size = sub == 1 ? 4u : 8u, t0 = 0, t1 = 0; int64_t to = (int64_t)sp[-1];
+            uint64_t expected = sp[-2], ea = (uint64_t)(uint32_t)sp[-3] + off, curv; const uint8_t *q;
+            sp -= 2;
+            if (!vm->mem_shared) TRAP(ECCLES_WASM_TRAP_ATOMIC);
+            if (ea + size > memsz) TRAP(ECCLES_WASM_TRAP_MEM_OOB);
+            if (ea & (size - 1u)) TRAP(ECCLES_WASM_TRAP_ATOMIC);
+            q = mem + ea;
+            if (size == 4) { expected = (uint32_t)expected; curv = __atomic_load_n((const uint32_t *)(const void *)q, __ATOMIC_SEQ_CST); }
+            else curv = __atomic_load_n((const uint64_t *)(const void *)q, __ATOMIC_SEQ_CST);
+            if (curv != expected) { sp[-1] = 1; NEXT; }  //"not-equal"
+            if (to == 0) { sp[-1] = 2; NEXT; }  //"timed-out"
+            (void)eccles_wasm_millis(&t0);
+            for (;;) {
+                TICK();  //a wait that can never be woken ends in the fuel trap
+                (void)eccles_wasm_yield(); (void)eccles_wasm_sleep(1);
+                curv = size == 4 ? (uint64_t)__atomic_load_n((const uint32_t *)(const void *)q, __ATOMIC_SEQ_CST)
+                                 : __atomic_load_n((const uint64_t *)(const void *)q, __ATOMIC_SEQ_CST);
+                if (curv != expected) { sp[-1] = 0; break; }  //"ok" (woken by a store)
+                if (to > 0 && eccles_wasm_millis(&t1) == ECCLES_WASM_SUCCESSFUL && (uint64_t)(uint32_t)(t1 - t0) * 1000000u >= (uint64_t)to) { sp[-1] = 2; break; }
+            }
+            NEXT; }
+#endif
+        //constants
         CASE(0x41) CASE(0x43) *sp++ = IMM32(); NEXT;
         CASE(0x42) CASE(0x44) { uint64_t lo = IMM32(); uint64_t hi = IMM32(); *sp++ = lo | (hi << 32); NEXT; }
-        /* ---- i32 compare ---- */
+        //i32 compare
         CASE(0x45) UN32(a == 0)
         CASE(0x46) BIN32(a == b)
         CASE(0x47) BIN32(a != b)
@@ -1692,7 +1911,7 @@ static eccles_wasm_error_t w_exec(eccles_wasm_vm_t *vm, const w_func_t *f0) {
         CASE(0x4D) BIN32(a <= b)
         CASE(0x4E) BIN32((int32_t)a >= (int32_t)b)
         CASE(0x4F) BIN32(a >= b)
-        /* ---- i64 compare ---- */
+        //i64 compare
         CASE(0x50) UN64(a == 0)
         CASE(0x51) BIN64(a == b)
         CASE(0x52) BIN64(a != b)
@@ -1718,7 +1937,7 @@ static eccles_wasm_error_t w_exec(eccles_wasm_vm_t *vm, const w_func_t *f0) {
         CASE(0x65) FCMP64(a <= b)
         CASE(0x66) FCMP64(a >= b)
 #endif
-        /* ---- i32 arithmetic ---- */
+        //i32 arithmetic
         CASE(0x67) UN32(w_clz32(a))
         CASE(0x68) UN32(w_ctz32(a))
         CASE(0x69) UN32(w_pop32(a))
@@ -1746,7 +1965,7 @@ static eccles_wasm_error_t w_exec(eccles_wasm_vm_t *vm, const w_func_t *f0) {
         CASE(0x76) BIN32(a >> (b & 31))
         CASE(0x77) BIN32((a << (b & 31)) | (a >> ((32 - (b & 31)) & 31)))
         CASE(0x78) BIN32((a >> (b & 31)) | (a << ((32 - (b & 31)) & 31)))
-        /* ---- i64 arithmetic ---- */
+        //i64 arithmetic
         CASE(0x79) UN64(w_clz64(a))
         CASE(0x7A) UN64(w_ctz64(a))
         CASE(0x7B) UN64(w_pop64(a))
@@ -1775,7 +1994,7 @@ static eccles_wasm_error_t w_exec(eccles_wasm_vm_t *vm, const w_func_t *f0) {
         CASE(0x89) BIN64((a << (b & 63)) | (a >> ((64 - (b & 63)) & 63)))
         CASE(0x8A) BIN64((a >> (b & 63)) | (a << ((64 - (b & 63)) & 63)))
 #if !defined(ECCLES_WASM_NO_FLOAT)
-        /* ---- f32 ---- */
+        //f32
         CASE(0x8B) sp[-1] = (uint32_t)sp[-1] & 0x7FFFFFFFu; NEXT;
         CASE(0x8C) sp[-1] = (uint32_t)sp[-1] ^ 0x80000000u; NEXT;
         CASE(0x8D) FUN32(f32_ceil(a))
@@ -1790,7 +2009,7 @@ static eccles_wasm_error_t w_exec(eccles_wasm_vm_t *vm, const w_func_t *f0) {
         CASE(0x96) FBIN32(f32_min(a, b))
         CASE(0x97) FBIN32(f32_max(a, b))
         CASE(0x98) { uint32_t b = (uint32_t)sp[-1], a = (uint32_t)sp[-2]; sp--; sp[-1] = (a & 0x7FFFFFFFu) | (b & 0x80000000u); NEXT; }
-        /* ---- f64 ---- */
+        //f64
         CASE(0x99) sp[-1] &= 0x7FFFFFFFFFFFFFFFull; NEXT;
         CASE(0x9A) sp[-1] ^= 0x8000000000000000ull; NEXT;
         CASE(0x9B) FUN64(f64_ceil(a))
@@ -1806,7 +2025,7 @@ static eccles_wasm_error_t w_exec(eccles_wasm_vm_t *vm, const w_func_t *f0) {
         CASE(0xA5) FBIN64(f64_max(a, b))
         CASE(0xA6) { uint64_t b = sp[-1], a = sp[-2]; sp--; sp[-1] = (a & 0x7FFFFFFFFFFFFFFFull) | (b & 0x8000000000000000ull); NEXT; }
 #endif
-        /* ---- conversions ---- */
+        //conversions
         CASE(0xA7) UN64((uint32_t)a)
         CASE(0xAC) sp[-1] = (uint64_t)(int64_t)(int32_t)(uint32_t)sp[-1]; NEXT;
         CASE(0xAD) sp[-1] = (uint32_t)sp[-1]; NEXT;
@@ -1853,7 +2072,7 @@ static eccles_wasm_error_t w_exec(eccles_wasm_vm_t *vm, const w_func_t *f0) {
             sp[-1] = r; NEXT; }
 #endif
 
-        /* ---- fused instructions (generated from W_*_LIST; see the notes at the top of the file) ---- */
+        //fused instructions (generated from W_*_LIST; see the notes at the top of the file)
 #define IMM32AT(q) ((uint32_t)(q)[0] | ((uint32_t)(q)[1] << 16))
 #define X(n, o, e) \
         CASE(FLL_##n) { uint32_t a = (uint32_t)fp[pc[0]], b = (uint32_t)fp[pc[1]]; pc += 2; *sp++ = (uint32_t)(e); NEXT; } \
@@ -1890,8 +2109,8 @@ static eccles_wasm_error_t w_exec(eccles_wasm_vm_t *vm, const w_func_t *f0) {
         continue;
 #endif
 
-    do_tailcall:                                            /* return_call / return_call_indirect: reuse the frame */
-        if (!f->code) {                                     /* host callee: call it, then return its results */
+    do_tailcall:  //return_call / return_call_indirect: reuse the frame
+        if (!f->code) {  //host callee: call it, then return its results
             uint64_t *args = sp - f->nparams;
             if (f->host(vm, args) != ECCLES_WASM_SUCCESSFUL) TRAP(ECCLES_WASM_TRAP_HOST);
             sp = args + f->nresults;
@@ -1909,7 +2128,7 @@ static eccles_wasm_error_t w_exec(eccles_wasm_vm_t *vm, const w_func_t *f0) {
         W_REDISPATCH;
 
     do_call:
-        if (!f->code) {                                         /* host function */
+        if (!f->code) {  //host function
             uint64_t *args = sp - f->nparams;
             if (f->host(vm, args) != ECCLES_WASM_SUCCESSFUL) TRAP(ECCLES_WASM_TRAP_HOST);
             sp = args + f->nresults;
@@ -1940,12 +2159,11 @@ trap:
   #pragma GCC diagnostic pop
 #endif
 
-/* ===================================================================== *
- *  5. public runtime API
- * ===================================================================== */
+//5. public runtime API
 
 static void w_clear_err(eccles_wasm_vm_t *vm) { vm->err = ECCLES_WASM_OK; vm->err_info = 0; vm->err_str[0] = 0; }
 
+//internal error -> the 3 public status values (SUCCESSFUL, FAILED, UNSUPPORTED)
 static eccles_wasm_status_t w_status_of(eccles_wasm_error_t e) {
     if (e == ECCLES_WASM_OK) return ECCLES_WASM_SUCCESSFUL;
     if (e == ECCLES_WASM_ERR_UNSUPPORTED_FEATURE || e == ECCLES_WASM_ERR_IMPORT || e == ECCLES_WASM_ERR_NO_FS)
@@ -1953,16 +2171,18 @@ static eccles_wasm_status_t w_status_of(eccles_wasm_error_t e) {
     return ECCLES_WASM_FAILED;
 }
 
+//drops the loaded module and gives the arena space back (lo goes back to the base, hi goes back to just under the stacks)
 static void w_module_reset(eccles_wasm_vm_t *vm) {
     vm->ntypes = vm->nfuncs = vm->nimports = vm->nglobals = vm->nexports = 0; vm->nglobals_imp = 0; vm->ntables = 0; vm->neseg = 0; vm->tables = NULL; vm->eseg = NULL;
     vm->start = 0xFFFFu;
-    vm->has_mem = vm->code_seen = vm->loaded = vm->exit_req = 0;
+    vm->has_mem = vm->code_seen = vm->loaded = vm->exit_req = vm->mem_shared = vm->snap_ok = 0;
     vm->types = NULL; vm->type_off = vm->type_canon = NULL; vm->funcs = NULL; vm->globals = NULL;
     vm->exports = NULL; vm->mem = NULL; vm->segs = NULL; vm->nseg = 0;
     vm->mem_bytes = vm->mem_pages = vm->code_bytes = 0;
     vm->lo = vm->base; vm->hi = vm->hi_init;
 }
 
+//NOTE: the instance struct itself lives at the start of the memory you give us
 eccles_wasm_vm_t *eccles_wasm_vm_create(void *mem, size_t size) {
     uintptr_t b = ((uintptr_t)mem + 7u) & ~(uintptr_t)7u;
     size_t adj = (size_t)(b - (uintptr_t)mem), hdr = (sizeof(struct eccles_wasm_vm_s) + 7u) & ~(size_t)7u;
@@ -1977,6 +2197,7 @@ eccles_wasm_vm_t *eccles_wasm_vm_create(void *mem, size_t size) {
     if (vm->err) return NULL;
     vm->hi_init = vm->hi;
     w_module_reset(vm);
+    eccles_wasm_privilege_init(&vm->priv, ECCLES_WASM_DEFAULT_PRIVILEGE);
     vm->inited = 1;
     return vm;
 }
@@ -2006,6 +2227,7 @@ eccles_wasm_status_t eccles_wasm_vm_unload(eccles_wasm_vm_t *vm) {
     return ECCLES_WASM_SUCCESSFUL;
 }
 
+//runs a function from the host side. the arguments are copied to the bottom of the value stack
 static eccles_wasm_error_t w_invoke(eccles_wasm_vm_t *vm, const w_func_t *f, const uint64_t *args, uint32_t nargs,
                                     uint64_t *res, uint32_t maxres) {
     eccles_wasm_error_t e; uint32_t i;
@@ -2015,16 +2237,23 @@ static eccles_wasm_error_t w_invoke(eccles_wasm_vm_t *vm, const w_func_t *f, con
     if (!f->code) e = (f->host(vm, vm->stk) == ECCLES_WASM_SUCCESSFUL) ? ECCLES_WASM_OK : ECCLES_WASM_TRAP_HOST;
     else e = w_exec(vm, f);
     vm->running = 0;
-    if (e == ECCLES_WASM_TRAP_HOST && vm->exit_req) e = ECCLES_WASM_OK;       /* WASI proc_exit */
+    if (e == ECCLES_WASM_TRAP_HOST && vm->exit_req) e = ECCLES_WASM_OK;  //WASI proc_exit
     if (e == ECCLES_WASM_OK && res && !vm->exit_req)
         for (i = 0; i < f->nresults && i < maxres; i++) res[i] = vm->stk[i];
     return e;
 }
 
+#if ECCLES_WASM_THREADS
+static void w_snapshot(eccles_wasm_vm_t *vm);
+#endif
+//called when the whole module is loaded. runs the start function (when there is one) and cleans up if anything failed
 static eccles_wasm_status_t w_finish_load(eccles_wasm_vm_t *vm) {
     vm->rd.fn = NULL; vm->rd.ctx = NULL;
     if (!vm->err && !vm->loaded) {
         vm->loaded = 1;
+#if ECCLES_WASM_THREADS
+        if (vm->has_mem && vm->mem_shared) w_snapshot(vm);
+#endif
 #if ECCLES_WASM_AUTORUN_START
         if (vm->start != 0xFFFFu) {
             eccles_wasm_error_t e = w_invoke(vm, &vm->funcs[vm->start], NULL, 0, NULL, 0);
@@ -2051,6 +2280,7 @@ static eccles_wasm_status_t w_begin_load(eccles_wasm_vm_t *vm) {
     return ECCLES_WASM_SUCCESSFUL;
 }
 
+//load from memory (flash or ram), nothing is copied
 eccles_wasm_status_t eccles_wasm_vm_load_buffer(eccles_wasm_vm_t *vm, const void *wasm, size_t len) {
     if (w_begin_load(vm) != ECCLES_WASM_SUCCESSFUL) return ECCLES_WASM_FAILED;
     if (!wasm || !len) { w_fail(vm, ECCLES_WASM_ERR_BAD_ARG, 0); return ECCLES_WASM_FAILED; }
@@ -2059,6 +2289,7 @@ eccles_wasm_status_t eccles_wasm_vm_load_buffer(eccles_wasm_vm_t *vm, const void
     return w_finish_load(vm);
 }
 
+//load from anything that can give us bytes. the module is read in small chunks (ECCLES_WASM_CHUNK_SIZE) so it never has to be in ram
 eccles_wasm_status_t eccles_wasm_vm_load_stream(eccles_wasm_vm_t *vm, eccles_wasm_read_fn read, void *ctx) {
     if (w_begin_load(vm) != ECCLES_WASM_SUCCESSFUL) return ECCLES_WASM_FAILED;
     if (!read) { w_fail(vm, ECCLES_WASM_ERR_BAD_ARG, 0); return ECCLES_WASM_FAILED; }
@@ -2067,7 +2298,7 @@ eccles_wasm_status_t eccles_wasm_vm_load_stream(eccles_wasm_vm_t *vm, eccles_was
     return w_finish_load(vm);
 }
 
-/* ---- file systems ---- */
+//file systems
 #if ECCLES_WASM_FS == ECCLES_WASM_FS_STDIO
   #include <stdio.h>
   static void *w_fs_open(const char *p) { return (void *)fopen(p, "rb"); }
@@ -2126,7 +2357,7 @@ eccles_wasm_status_t eccles_wasm_vm_load(eccles_wasm_vm_t *vm, const char *path)
     return st;
 }
 
-/* ---- calling into the guest ---- */
+//calling into the guest
 bool eccles_wasm_vm_has_export(eccles_wasm_vm_t *vm, const char *name) {
     uint32_t i;
     if (!vm->loaded || !name) return false;
@@ -2134,6 +2365,8 @@ bool eccles_wasm_vm_has_export(eccles_wasm_vm_t *vm, const char *name) {
     return false;
 }
 
+//call an exported function by name. args and results are raw 64bit slots
+//the number of args must match exactly or we return FAILED
 eccles_wasm_status_t eccles_wasm_vm_call(eccles_wasm_vm_t *vm, const char *name, const uint64_t *args, uint32_t nargs,
                                       uint64_t *results, uint32_t max_results) {
     uint32_t i; const w_func_t *f = NULL; eccles_wasm_error_t e;
@@ -2171,7 +2404,7 @@ const char *eccles_wasm_error_name(eccles_wasm_error_t e) {
         "bad argument", "trap: unreachable", "trap: out-of-bounds memory access", "trap: integer divide by zero",
         "trap: integer overflow", "trap: invalid conversion to integer", "trap: undefined table element",
         "trap: indirect call type mismatch", "trap: value stack overflow", "trap: call stack overflow",
-        "trap: instruction budget exhausted", "trap: host function failed", "trap: out-of-bounds table access"
+        "trap: instruction budget exhausted", "trap: host function failed", "trap: out-of-bounds table access", "trap: unaligned atomic access or wait on unshared memory"
     };
     return (unsigned)e < sizeof n / sizeof n[0] ? n[e] : "unknown error";
 }
@@ -2205,7 +2438,104 @@ eccles_wasm_status_t eccles_wasm_vm_set_global(eccles_wasm_vm_t *vm, const char 
 void eccles_wasm_vm_unregister_all(eccles_wasm_vm_t *vm) { vm->nhost = 0; }
 
 
-/* ---- the simple, handle-free API: everything operates on one default instance ---- */
+
+//hardware privilege
+void eccles_wasm_privilege_init(eccles_wasm_privilege_t *p, uint32_t perms) {
+    memset(p, 0, sizeof *p);
+    p->perms = perms & ECCLES_WASM_ALLOW_ALL;
+}
+eccles_wasm_status_t eccles_wasm_privilege_allow_pin_range(eccles_wasm_privilege_t *p, uint32_t lo, uint32_t hi) {
+    uint32_t i;
+    if (!p || lo > hi || hi >= ECCLES_WASM_PIN_FILTER_BITS) return ECCLES_WASM_FAILED;
+    p->pins_restricted = 1;
+    for (i = lo; i <= hi; i++) p->pin_bits[i >> 3] = (uint8_t)(p->pin_bits[i >> 3] | (1u << (i & 7u)));
+    return ECCLES_WASM_SUCCESSFUL;
+}
+eccles_wasm_status_t eccles_wasm_privilege_allow_pin(eccles_wasm_privilege_t *p, uint32_t pin) { return eccles_wasm_privilege_allow_pin_range(p, pin, pin); }
+eccles_wasm_status_t eccles_wasm_privilege_allow_bus(eccles_wasm_privilege_t *p, eccles_wasm_bus_t kind, uint32_t id) {
+    if (!p || id > 15u || (unsigned)kind > 2u) return ECCLES_WASM_FAILED;
+    p->bus_restricted = (uint8_t)(p->bus_restricted | (1u << (unsigned)kind));
+    if (kind == ECCLES_WASM_BUS_UART) p->uart_ports = (uint16_t)(p->uart_ports | (1u << id));
+    else if (kind == ECCLES_WASM_BUS_I2C) p->i2c_buses = (uint16_t)(p->i2c_buses | (1u << id));
+    else p->spi_buses = (uint16_t)(p->spi_buses | (1u << id));
+    return ECCLES_WASM_SUCCESSFUL;
+}
+eccles_wasm_status_t eccles_wasm_privilege_allow_i2c_addr(eccles_wasm_privilege_t *p, uint32_t lo, uint32_t hi) {
+    uint32_t i;
+    if (!p || lo > hi || hi > 127u) return ECCLES_WASM_FAILED;
+    p->i2c_addr_restricted = 1;
+    for (i = lo; i <= hi; i++) p->i2c_addr_bits[i >> 3] = (uint8_t)(p->i2c_addr_bits[i >> 3] | (1u << (i & 7u)));
+    return ECCLES_WASM_SUCCESSFUL;
+}
+eccles_wasm_status_t eccles_wasm_vm_set_privilege(eccles_wasm_vm_t *vm, const eccles_wasm_privilege_t *p) {
+    if (!vm || !p) return ECCLES_WASM_FAILED;
+    vm->priv = *p; vm->priv.perms &= ECCLES_WASM_ALLOW_ALL;
+    return ECCLES_WASM_SUCCESSFUL;
+}
+eccles_wasm_status_t eccles_wasm_vm_set_hal_privilege(eccles_wasm_vm_t *vm, uint32_t perms) {
+    if (!vm) return ECCLES_WASM_FAILED;
+    eccles_wasm_privilege_init(&vm->priv, perms);
+    return ECCLES_WASM_SUCCESSFUL;
+}
+void eccles_wasm_vm_get_privilege(const eccles_wasm_vm_t *vm, eccles_wasm_privilege_t *out) { *out = vm->priv; }
+uint32_t eccles_wasm_vm_denied_count(const eccles_wasm_vm_t *vm) { return vm->denied; }
+const char *eccles_wasm_vm_last_denied(const eccles_wasm_vm_t *vm) { return vm->last_denied ? vm->last_denied : ""; }
+void eccles_wasm_vm_set_denied_hook(eccles_wasm_vm_t *vm, eccles_wasm_denied_fn hook) { vm->denied_hook = hook; }
+
+
+#if ECCLES_WASM_THREADS
+//threads: snapshot at load time, sibling instances at spawn time
+static void w_snapshot(eccles_wasm_vm_t *vm) {
+    uint32_t i, total = 0;
+    vm->g0 = NULL; vm->t0 = NULL; vm->eseg0 = NULL; vm->segs0 = NULL;
+    if (vm->nglobals) { vm->g0 = (uint64_t *)w_alo(vm, (size_t)vm->nglobals * 8u, 8); if (vm->g0) memcpy(vm->g0, vm->globals, (size_t)vm->nglobals * 8u); }
+    for (i = 0; i < vm->ntables; i++) total += vm->tables[i].size;
+    if (total) { vm->t0 = (uint32_t *)w_alo(vm, (size_t)total * 4u, 4);
+        if (vm->t0) { uint32_t off = 0; for (i = 0; i < vm->ntables; i++) { memcpy(vm->t0 + off, vm->tables[i].elems, (size_t)vm->tables[i].size * 4u); off += vm->tables[i].size; } } }
+    if (vm->neseg) { vm->eseg0 = (w_eseg_t *)w_alo(vm, (size_t)vm->neseg * sizeof(w_eseg_t), sizeof(void *)); if (vm->eseg0) memcpy(vm->eseg0, vm->eseg, (size_t)vm->neseg * sizeof(w_eseg_t)); }
+    if (vm->nseg) { vm->segs0 = (struct w_seg *)w_alo(vm, (size_t)vm->nseg * sizeof(struct w_seg), sizeof(void *)); if (vm->segs0) memcpy(vm->segs0, vm->segs, (size_t)vm->nseg * sizeof(struct w_seg)); }
+    vm->snap_ok = (uint8_t)(vm->err == ECCLES_WASM_OK);
+}
+
+eccles_wasm_vm_t *eccles_wasm_vm_spawn(eccles_wasm_vm_t *parent, void *mem, size_t size) {
+    eccles_wasm_vm_t *c; uint32_t i, off = 0;
+    if (!parent || !parent->loaded || !parent->snap_ok || !parent->has_mem || !parent->mem_shared) return NULL;
+    c = eccles_wasm_vm_create(mem, size);
+    if (!c) return NULL;
+    c->parent = parent;
+    c->types = parent->types; c->type_off = parent->type_off; c->type_canon = parent->type_canon; c->ntypes = parent->ntypes;
+    c->funcs = parent->funcs; c->nfuncs = parent->nfuncs; c->nimports = parent->nimports;
+    c->exports = parent->exports; c->nexports = parent->nexports; c->start = parent->start;
+    c->mem = parent->mem; c->mem_bytes = parent->mem_bytes; c->mem_pages = parent->mem_pages; c->has_mem = 1; c->mem_shared = 1;
+    c->code_bytes = parent->code_bytes; c->code_seen = 1;
+    c->priv = parent->priv; c->spawn_cb = parent->spawn_cb; c->spawn_ctx = parent->spawn_ctx; c->user = parent->user;
+    c->nglobals = parent->nglobals;
+    if (c->nglobals) { c->globals = (uint64_t *)w_alo(c, (size_t)c->nglobals * 8u, 8); if (c->globals) memcpy(c->globals, parent->g0, (size_t)c->nglobals * 8u); }
+    if (parent->ntables) {
+        c->tables = (w_table_t *)w_alo(c, (size_t)parent->ntables * sizeof(w_table_t), sizeof(void *));
+        for (i = 0; c->tables && i < parent->ntables; i++) {
+            c->tables[i].size = parent->tables[i].size;
+            c->tables[i].elems = (uint32_t *)w_alo(c, (size_t)c->tables[i].size * 4u + 4u, 4);
+            if (c->tables[i].elems) memcpy(c->tables[i].elems, parent->t0 + off, (size_t)c->tables[i].size * 4u);
+            off += c->tables[i].size;
+        }
+        c->ntables = parent->ntables;
+    }
+    if (parent->neseg) { c->eseg = (w_eseg_t *)w_alo(c, (size_t)parent->neseg * sizeof(w_eseg_t), sizeof(void *)); if (c->eseg) memcpy(c->eseg, parent->eseg0, (size_t)parent->neseg * sizeof(w_eseg_t)); c->neseg = parent->neseg; }
+    if (parent->nseg) { c->segs = (struct w_seg *)w_alo(c, (size_t)parent->nseg * sizeof(struct w_seg), sizeof(void *)); if (c->segs) memcpy(c->segs, parent->segs0, (size_t)parent->nseg * sizeof(struct w_seg)); c->nseg = parent->nseg; }
+    if (c->err) return NULL;
+    c->loaded = 1;
+    return c;
+}
+void eccles_wasm_vm_set_thread_spawner(eccles_wasm_vm_t *vm, eccles_wasm_thread_spawn_fn fn, void *ctx) { vm->spawn_cb = fn; vm->spawn_ctx = ctx; }
+eccles_wasm_status_t eccles_wasm_vm_thread_start(eccles_wasm_vm_t *child, int32_t tid, uint32_t start_arg) {
+    uint64_t a[2];
+    a[0] = (uint32_t)tid; a[1] = start_arg;
+    return eccles_wasm_vm_call(child, "wasi_thread_start", a, 2, NULL, 0);
+}
+#endif
+
+//the simple, handle-free API: everything operates on one default instance
 static eccles_wasm_vm_t *g_def;
 static eccles_wasm_vm_t *w_def(void) {
     if (!g_def) {
@@ -2248,6 +2578,10 @@ eccles_wasm_stats_t eccles_wasm_get_stats(void) {
 }
 eccles_wasm_status_t eccles_wasm_register(const char *n, eccles_wasm_host_fn f, const char *sig) { W_DEF(ECCLES_WASM_FAILED); return eccles_wasm_vm_register(vm, n, f, sig); }
 void eccles_wasm_unregister_all(void) { eccles_wasm_vm_t *vm = w_def(); if (vm) eccles_wasm_vm_unregister_all(vm); }
+eccles_wasm_status_t eccles_wasm_set_privilege(const eccles_wasm_privilege_t *p) { W_DEF(ECCLES_WASM_FAILED); return eccles_wasm_vm_set_privilege(vm, p); }
+eccles_wasm_status_t eccles_wasm_set_hal_privilege(uint32_t perms) { W_DEF(ECCLES_WASM_FAILED); return eccles_wasm_vm_set_hal_privilege(vm, perms); }
+uint32_t eccles_wasm_denied_count(void) { W_DEF(0); return eccles_wasm_vm_denied_count(vm); }
+const char *eccles_wasm_last_denied(void) { W_DEF(""); return eccles_wasm_vm_last_denied(vm); }
 
 void eccles_wasm_hal_reset(void) { memset(&g_hal_user, 0, sizeof g_hal_user); }
 void eccles_wasm_hal_override(const eccles_wasm_hal_t *o) {
@@ -2257,13 +2591,9 @@ void eccles_wasm_hal_override(const eccles_wasm_hal_t *o) {
     for (i = 0; i < sizeof g_hal_user / sizeof(vfn); i++) if (src[i]) dst[i] = src[i];
 }
 
-/* ===================================================================== *
- *  6. hardware backends
- *
- *  Every backend implements some subset of the plat_* functions and
- *  #defines W_HAS_<name> for each one; the stubs further down return
- *  UNSUPPORTED for the rest, so a backend only writes what its chip can do.
- * ===================================================================== */
+//6. hardware backends
+//every backend implements some of the plat_* functions and defines W_HAS_<name> for each one
+//the stubs further down return UNSUPPORTED for the rest, so a backend only has to write what its chip can do
 
 #if defined(__GNUC__) || defined(__clang__)
   #pragma GCC diagnostic push
@@ -2276,7 +2606,7 @@ void eccles_wasm_hal_override(const eccles_wasm_hal_t *o) {
 #define W_NS  ECCLES_WASM_UNSUPPORTED
 typedef eccles_wasm_status_t w_st;
 
-/* Cortex-M software reset without needing CMSIS headers */
+//cortex-M software reset without needing CMSIS headers
 #if defined(__ARM_ARCH_6M__) || defined(__ARM_ARCH_7M__) || defined(__ARM_ARCH_7EM__) || \
     defined(__ARM_ARCH_8M_MAIN__) || defined(__ARM_ARCH_8M_BASE__)
   #define W_CORTEX_M 1
@@ -2287,7 +2617,7 @@ typedef eccles_wasm_status_t w_st;
   }
 #endif
 
-/* shared pin-interrupt counters (ESP-IDF / Pico) */
+//shared pin-interrupt counters (ESP-IDF / Pico)
 #if ECCLES_WASM_PLATFORM == ECCLES_WASM_PLAT_ESP_IDF || ECCLES_WASM_PLATFORM == ECCLES_WASM_PLAT_PICO
 static struct { int32_t pin; uint8_t edge; volatile uint32_t count; } w_irq[ECCLES_WASM_MAX_IRQ];
 static int w_irq_slot(uint32_t pin, int alloc) {
@@ -2300,7 +2630,7 @@ static int w_irq_slot(uint32_t pin, int alloc) {
 }
 #endif
 
-/* =================================================================== HOST */
+//host backend
 #if ECCLES_WASM_PLATFORM == ECCLES_WASM_PLAT_HOST
 #include <stdio.h>
 #if defined(_WIN32)
@@ -2308,7 +2638,7 @@ static int w_irq_slot(uint32_t pin, int alloc) {
 #else
   #include <time.h>
 #endif
-#if defined(ECCLES_WASM_THREADSAFE) && !defined(_WIN32) && !defined(ECCLES_WASM_USER_LOCK)
+#if defined(ECCLES_WASM_HOST_PTHREAD_LOCK)  //set by eccles_wasm.h when it wires the host mutex
   #include <pthread.h>
   static pthread_mutex_t w_host_mx = PTHREAD_MUTEX_INITIALIZER;
   void eccles_wasm_host_lock(void)   { pthread_mutex_lock(&w_host_mx); }
@@ -2422,7 +2752,7 @@ static w_st plat_spi_begin(uint32_t b, int32_t a, int32_t m, int32_t i, uint32_t
 static w_st plat_spi_transfer(uint32_t b, const uint8_t *t, uint8_t *r, uint32_t n) {
     uint32_t i;
     if (b >= 2) return W_BAD;
-    for (i = 0; i < n; i++) { uint8_t v = t ? t[i] : 0; if (r) r[i] = v; }      /* loopback */
+    for (i = 0; i < n; i++) { uint8_t v = t ? t[i] : 0; if (r) r[i] = v; }  //loopback
     return W_OK;
 }
 static w_st plat_spi_end(uint32_t b) { return b < 2 ? W_OK : W_BAD; }
@@ -2501,7 +2831,7 @@ uint32_t eccles_wasm_sim_i2c_last_write(uint32_t b, uint8_t *o, uint32_t max) {
 uint32_t eccles_wasm_sim_i2c_last_addr(uint32_t b) { return b < 2 ? sim_i2c_addr[b] : 0; }
 bool eccles_wasm_sim_reset_requested(void) { return sim_reset_flag != 0; }
 
-/* ============================================================== ARDUINO */
+//arduino backend
 #elif ECCLES_WASM_PLATFORM == ECCLES_WASM_PLAT_ARDUINO
 #include <Arduino.h>
 #if defined(ARDUINO_ARCH_ESP32)
@@ -2556,7 +2886,7 @@ static w_st plat_reset(void) { w_cortexm_reset(); return W_OK; }
 #define W_HAS_sleep_us 1
 #define W_HAS_yield 1
 
-/* ============================================================== ESP-IDF */
+//esp-idf backend
 #elif ECCLES_WASM_PLATFORM == ECCLES_WASM_PLAT_ESP_IDF
 #include <stdio.h>
 #include "freertos/FreeRTOS.h"
@@ -2603,7 +2933,7 @@ static w_st plat_gpio_read(uint32_t pin, uint32_t *l) {
     *l = (uint32_t)gpio_get_level((gpio_num_t)pin); return W_OK;
 }
 
-/* PWM: one LEDC timer shared by every PWM pin (changing the frequency changes it for all) */
+//PWM: one LEDC timer shared by every PWM pin (changing the frequency changes it for all)
 #define W_PWM_CH 8
 static int32_t w_pwm_pin[W_PWM_CH];
 static uint8_t w_pwm_init;
@@ -2801,7 +3131,7 @@ static w_st plat_spi_end(uint32_t bus) {
 #define W_HAS_spi_transfer 1
 #define W_HAS_spi_end 1
 
-/* ================================================================== PICO */
+//pico backend
 #elif ECCLES_WASM_PLATFORM == ECCLES_WASM_PLAT_PICO
 #include <stdio.h>
 #include "pico/stdlib.h"
@@ -2925,7 +3255,7 @@ static w_st plat_i2c_read(uint32_t b, uint32_t a, uint8_t *d, uint32_t n) {
 }
 static w_st plat_i2c_write_read(uint32_t b, uint32_t a, const uint8_t *t, uint32_t tn, uint8_t *r, uint32_t rn) {
     i2c_inst_t *i = w_i2c(b); if (!i) return W_BAD;
-    if (i2c_write_blocking(i, (uint8_t)a, t, tn, true) != (int)tn) return W_BAD;      /* repeated start */
+    if (i2c_write_blocking(i, (uint8_t)a, t, tn, true) != (int)tn) return W_BAD;  //repeated start
     return i2c_read_blocking(i, (uint8_t)a, r, rn, false) == (int)rn ? W_OK : W_BAD;
 }
 static w_st plat_spi_begin(uint32_t b, int32_t sck, int32_t mosi, int32_t miso, uint32_t f, uint32_t mode) {
@@ -2978,7 +3308,7 @@ static w_st plat_spi_end(uint32_t b) { spi_inst_t *s = w_spi(b); if (!s) return 
 #define W_HAS_spi_transfer 1
 #define W_HAS_spi_end 1
 
-/* ============================================================= STM32 HAL */
+//stm32 hal backend
 #elif ECCLES_WASM_PLATFORM == ECCLES_WASM_PLAT_STM32_HAL
 #ifndef ECCLES_WASM_STM32_HAL_HEADER
   #define ECCLES_WASM_STM32_HAL_HEADER "main.h"
@@ -3083,7 +3413,7 @@ static w_st plat_gpio_read(uint32_t pin, uint32_t *l) {
     *l = HAL_GPIO_ReadPin(p, (uint16_t)(1u << (pin & 15u))) == GPIO_PIN_SET ? 1u : 0u; return W_OK;
 }
 static w_st plat_millis(uint32_t *v) { *v = HAL_GetTick(); return W_OK; }
-static w_st plat_micros(uint32_t *v) {                 /* SysTick-based, works on every Cortex-M */
+static w_st plat_micros(uint32_t *v) {  //SysTick-based, works on every Cortex-M
     uint32_t ms, val, load;
     do { ms = HAL_GetTick(); val = SysTick->VAL; } while (ms != HAL_GetTick());
     load = SysTick->LOAD + 1u;
@@ -3141,7 +3471,7 @@ static w_st plat_i2c_read(uint32_t b, uint32_t a, uint8_t *d, uint32_t n) {
     I2C_HandleTypeDef *h = w_i2c_h(b); if (!h) return W_BAD;
     return HAL_I2C_Master_Receive(h, (uint16_t)(a << 1), d, (uint16_t)n, 1000) == HAL_OK ? W_OK : W_BAD;
 }
-/* NOTE: the polling HAL API cannot issue a repeated start - this is write, STOP, read. */
+//NOTE: the polling HAL API cannot issue a repeated start - this is write, STOP, read.
 static w_st plat_i2c_write_read(uint32_t b, uint32_t a, const uint8_t *t, uint32_t tn, uint8_t *r, uint32_t rn) {
     w_st s = plat_i2c_write(b, a, t, tn);
     return s == W_OK ? plat_i2c_read(b, a, r, rn) : s;
@@ -3172,7 +3502,7 @@ static w_st plat_spi_end(uint32_t b) { return w_spi_h(b) ? W_OK : W_BAD; }
 #define W_HAS_spi_end 1
 #endif
 
-/* ============================================================== ZEPHYR */
+//zephyr backend
 #elif ECCLES_WASM_PLATFORM == ECCLES_WASM_PLAT_ZEPHYR
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/gpio.h>
@@ -3257,9 +3587,9 @@ static w_st plat_log(const uint8_t *b, uint32_t n) { uint32_t i; for (i = 0; i <
 #define W_HAS_yield 1
 #define W_HAS_log 1
 
-#endif /* platform */
+#endif  //platform
 
-/* ---- stubs: UNSUPPORTED for everything a backend didn't provide ---- */
+//stubs: UNSUPPORTED for everything a backend didnt provide
 #define W_STUB(name, params) static w_st plat_##name params { return W_NS; }
 #ifndef W_HAS_gpio_mode
 W_STUB(gpio_mode, (uint32_t pin, uint32_t mode))
@@ -3367,9 +3697,7 @@ static const eccles_wasm_hal_t g_plat = {
     plat_spi_begin, plat_spi_transfer, plat_spi_end
 };
 
-/* ===================================================================== *
- *  public hardware API (dispatch: run-time override first, then backend)
- * ===================================================================== */
+//public hardware API (dispatch: run-time override first, then backend)
 
 #define W_HAL(f) (g_hal_user.f ? g_hal_user.f : g_plat.f)
 #define W_HWL(expr) { w_st r_; ECCLES_WASM_HW_LOCK(); r_ = (expr); ECCLES_WASM_HW_UNLOCK(); return r_; }
@@ -3400,7 +3728,7 @@ w_st eccles_wasm_dac(uint32_t pin, uint32_t v) W_HWL(W_HAL(dac)(pin, v))
 w_st eccles_wasm_sleep(uint32_t ms)                 { return W_HAL(sleep_ms)(ms); }
 w_st eccles_wasm_sleep_us(uint32_t us) {
     w_st s = W_HAL(sleep_us)(us);
-    if (s == W_NS) {                                         /* no delay primitive: spin on micros() */
+    if (s == W_NS) {  //no delay primitive: spin on micros()
         uint32_t t0, t;
         if (W_HAL(micros)(&t0) != W_OK) return W_NS;
         do { (void)W_HAL(micros)(&t); } while ((uint32_t)(t - t0) < us);
@@ -3436,85 +3764,132 @@ w_st eccles_wasm_spi_end(uint32_t b) W_HWL(W_HAL(spi_end)(b))
   #pragma GCC diagnostic pop
 #endif
 
-/* ===================================================================== *
- *  guest-facing import table
- * ===================================================================== */
+//guest-facing import table
 
 typedef struct { const char *name; eccles_wasm_host_fn fn; const char *sig; } w_builtin_t;
 
 #define A(i)  ((uint32_t)s[i])
 #define SA(i) ((int32_t)(uint32_t)s[i])
 #define RET(st) do { s[0] = (uint64_t)(st); return ECCLES_WASM_SUCCESSFUL; } while (0)
+#if !defined(ECCLES_WASM_NO_BUILTIN_IMPORTS) || ECCLES_WASM_WASI
 static void w_put32(uint8_t *p, uint32_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24); }
-static W_MAYBE_UNUSED void w_put64(uint8_t *p, uint64_t v) { w_put32(p, (uint32_t)v); w_put32(p + 4, (uint32_t)(v >> 32)); }
-static W_MAYBE_UNUSED uint32_t w_get32(const uint8_t *p) { return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24); }
+#endif
+#if ECCLES_WASM_WASI
+static void w_put64(uint8_t *p, uint64_t v) { w_put32(p, (uint32_t)v); w_put32(p + 4, (uint32_t)(v >> 32)); }
+static uint32_t w_get32(const uint8_t *p) { return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24); }
+#endif
+
+//privilege checks (guest-facing imports only)
+#if !defined(ECCLES_WASM_NO_BUILTIN_IMPORTS) || ECCLES_WASM_WASI || ECCLES_WASM_THREADS
+static void w_denied(eccles_wasm_vm_t *vm, const char *op) {
+    vm->denied++; vm->last_denied = op;
+    if (vm->denied_hook) vm->denied_hook(vm, op);
+}
+static int w_pin_ok(const eccles_wasm_vm_t *vm, uint32_t pin) {
+    if (!vm->priv.pins_restricted) return 1;
+    return pin < ECCLES_WASM_PIN_FILTER_BITS && ((vm->priv.pin_bits[pin >> 3] >> (pin & 7u)) & 1u);
+}
+static int w_bus_ok(const eccles_wasm_vm_t *vm, unsigned kind, uint32_t id) {
+    uint16_t map;
+    if (!(vm->priv.bus_restricted & (1u << kind))) return 1;
+    if (id > 15u) return 0;
+    map = kind == 0 ? vm->priv.uart_ports : kind == 1 ? vm->priv.i2c_buses : vm->priv.spi_buses;
+    return (map >> id) & 1u;
+}
+static int w_addr_ok(const eccles_wasm_vm_t *vm, uint32_t a) {
+    if (!vm->priv.i2c_addr_restricted) return 1;
+    return a < 128u && ((vm->priv.i2c_addr_bits[a >> 3] >> (a & 7u)) & 1u);
+}
+#endif
+#define DENY()          do { w_denied(vm, op_); RET(ECCLES_WASM_DENIED); } while (0)
+#define G_PERM(bits)    if ((vm->priv.perms & (bits)) != (bits)) DENY()
+#define G_PIN(bits, p)  G_PERM(bits); if (!w_pin_ok(vm, (uint32_t)(p))) DENY()
+#define G_PINOPT(p)     if ((int32_t)(p) >= 0 && !w_pin_ok(vm, (uint32_t)(p))) DENY()  //-1 = "board default" needs no pin right
+#define G_BUS(k, id)    if (!w_bus_ok(vm, (k), (uint32_t)(id))) DENY()
+#define G_ADDR(a)       if (!w_addr_ok(vm, (uint32_t)(a))) DENY()
+#define G_NONE
 
 #if !defined(ECCLES_WASM_NO_BUILTIN_IMPORTS)
-#define HW1(name, call) static eccles_wasm_status_t hw_##name(eccles_wasm_vm_t *vm, uint64_t *s) { (void)vm; RET(call); }
-#define HWOUT(name, outi, call) static eccles_wasm_status_t hw_##name(eccles_wasm_vm_t *vm, uint64_t *s) { \
-    uint32_t v = 0; uint8_t *p = eccles_wasm_vm_mem(vm, A(outi), 4); w_st st; \
-    if (!p) { RET(W_BAD); } \
+#define HW1(name, guard, call) static eccles_wasm_status_t hw_##name(eccles_wasm_vm_t *vm, uint64_t *s) { \
+    const char *op_ = #name; (void)op_; guard; RET(call); }
+#define HWOUT(name, outi, guard, call) static eccles_wasm_status_t hw_##name(eccles_wasm_vm_t *vm, uint64_t *s) { \
+    const char *op_ = #name; uint32_t v = 0; uint8_t *p; w_st st; (void)op_; guard; \
+    p = eccles_wasm_vm_mem(vm, A(outi), 4); if (!p) { RET(W_BAD); } \
     st = (call); if (st == W_OK) { w_put32(p, v); } RET(st); }
 
-HW1(enable, eccles_wasm_enable(A(0)))
-HW1(disable, eccles_wasm_disable(A(0)))
-HW1(toggle, eccles_wasm_toggle(A(0)))
-HW1(mode, eccles_wasm_mode(A(0), A(1)))
-HW1(write, eccles_wasm_write(A(0), A(1)))
-HWOUT(read, 1, eccles_wasm_read(A(0), &v))
-HW1(analog, eccles_wasm_analog(A(0), A(1)))
-HW1(pwm, eccles_wasm_pwm(A(0), A(1), A(2)))
-HWOUT(adc, 1, eccles_wasm_adc(A(0), &v))
-HW1(dac, eccles_wasm_dac(A(0), A(1)))
-HW1(sleep, eccles_wasm_sleep(A(0)))
-HW1(sleep_us, eccles_wasm_sleep_us(A(0)))
-HWOUT(millis, 0, eccles_wasm_millis(&v))
-HWOUT(micros, 0, eccles_wasm_micros(&v))
-HW1(yield, eccles_wasm_yield())
-HW1(deep_sleep, eccles_wasm_deep_sleep(A(0)))
-HW1(reset, eccles_wasm_reset())
-HW1(wdt_feed, eccles_wasm_wdt_feed())
-HWOUT(random, 0, eccles_wasm_random(&v))
-HW1(irq_attach, eccles_wasm_irq_attach(A(0), A(1)))
-HWOUT(irq_count, 1, eccles_wasm_irq_count(A(0), &v))
-HW1(irq_clear, eccles_wasm_irq_clear(A(0)))
-HW1(irq_detach, eccles_wasm_irq_detach(A(0)))
-HW1(uart_begin, eccles_wasm_uart_begin(A(0), A(1), SA(2), SA(3)))
-HW1(uart_end, eccles_wasm_uart_end(A(0)))
-HW1(i2c_begin, eccles_wasm_i2c_begin(A(0), SA(1), SA(2), A(3)))
-HW1(spi_begin, eccles_wasm_spi_begin(A(0), SA(1), SA(2), SA(3), A(4), A(5)))
-HW1(spi_end, eccles_wasm_spi_end(A(0)))
+HW1(enable,  G_PIN(ECCLES_WASM_PERM_GPIO_WRITE, A(0)), eccles_wasm_enable(A(0)))
+HW1(disable, G_PIN(ECCLES_WASM_PERM_GPIO_WRITE, A(0)), eccles_wasm_disable(A(0)))
+HW1(toggle,  G_PIN(ECCLES_WASM_PERM_GPIO_WRITE, A(0)), eccles_wasm_toggle(A(0)))
+HW1(mode,    G_PIN(ECCLES_WASM_PERM_GPIO_CONFIG, A(0)), eccles_wasm_mode(A(0), A(1)))
+HW1(write,   G_PIN(ECCLES_WASM_PERM_GPIO_WRITE, A(0)), eccles_wasm_write(A(0), A(1)))
+HWOUT(read, 1, G_PIN(ECCLES_WASM_PERM_GPIO_READ, A(0)), eccles_wasm_read(A(0), &v))
+HW1(analog,  G_PIN(ECCLES_WASM_PERM_ANALOG_OUT, A(0)), eccles_wasm_analog(A(0), A(1)))
+HW1(pwm,     G_PIN(ECCLES_WASM_PERM_ANALOG_OUT, A(0)), eccles_wasm_pwm(A(0), A(1), A(2)))
+HWOUT(adc, 1, G_PIN(ECCLES_WASM_PERM_ADC, A(0)), eccles_wasm_adc(A(0), &v))
+HW1(dac,     G_PIN(ECCLES_WASM_PERM_ANALOG_OUT, A(0)), eccles_wasm_dac(A(0), A(1)))
+HW1(sleep,    G_PERM(ECCLES_WASM_PERM_TIME), eccles_wasm_sleep(A(0)))
+HW1(sleep_us, G_PERM(ECCLES_WASM_PERM_TIME), eccles_wasm_sleep_us(A(0)))
+HWOUT(millis, 0, G_PERM(ECCLES_WASM_PERM_TIME), eccles_wasm_millis(&v))
+HWOUT(micros, 0, G_PERM(ECCLES_WASM_PERM_TIME), eccles_wasm_micros(&v))
+HW1(yield,      G_PERM(ECCLES_WASM_PERM_TIME), eccles_wasm_yield())
+HW1(deep_sleep, G_PERM(ECCLES_WASM_PERM_POWER), eccles_wasm_deep_sleep(A(0)))
+HW1(reset,      G_PERM(ECCLES_WASM_PERM_POWER), eccles_wasm_reset())
+HW1(wdt_feed,   G_PERM(ECCLES_WASM_PERM_WDT), eccles_wasm_wdt_feed())
+HWOUT(random, 0, G_PERM(ECCLES_WASM_PERM_RANDOM), eccles_wasm_random(&v))
+HW1(irq_attach, G_PIN(ECCLES_WASM_PERM_IRQ, A(0)), eccles_wasm_irq_attach(A(0), A(1)))
+HWOUT(irq_count, 1, G_PIN(ECCLES_WASM_PERM_IRQ, A(0)), eccles_wasm_irq_count(A(0), &v))
+HW1(irq_clear,  G_PIN(ECCLES_WASM_PERM_IRQ, A(0)), eccles_wasm_irq_clear(A(0)))
+HW1(irq_detach, G_PIN(ECCLES_WASM_PERM_IRQ, A(0)), eccles_wasm_irq_detach(A(0)))
+HW1(uart_begin, G_PERM(ECCLES_WASM_PERM_UART); G_BUS(0, A(0)); G_PINOPT(SA(2)); G_PINOPT(SA(3)), eccles_wasm_uart_begin(A(0), A(1), SA(2), SA(3)))
+HW1(uart_end,   G_PERM(ECCLES_WASM_PERM_UART); G_BUS(0, A(0)), eccles_wasm_uart_end(A(0)))
+HW1(i2c_begin,  G_PERM(ECCLES_WASM_PERM_I2C); G_BUS(1, A(0)); G_PINOPT(SA(1)); G_PINOPT(SA(2)), eccles_wasm_i2c_begin(A(0), SA(1), SA(2), A(3)))
+HW1(spi_begin,  G_PERM(ECCLES_WASM_PERM_SPI); G_BUS(2, A(0)); G_PINOPT(SA(1)); G_PINOPT(SA(2)); G_PINOPT(SA(3)), eccles_wasm_spi_begin(A(0), SA(1), SA(2), SA(3), A(4), A(5)))
+HW1(spi_end,    G_PERM(ECCLES_WASM_PERM_SPI); G_BUS(2, A(0)), eccles_wasm_spi_end(A(0)))
 
 static eccles_wasm_status_t hw_log(eccles_wasm_vm_t *vm, uint64_t *s) {
-    uint8_t *p = eccles_wasm_vm_mem(vm, A(0), A(1)); if (!p) RET(W_BAD);
+    const char *op_ = "log"; uint8_t *p;
+    G_PERM(ECCLES_WASM_PERM_LOG);
+    p = eccles_wasm_vm_mem(vm, A(0), A(1)); if (!p) RET(W_BAD);
     RET(eccles_wasm_log(p, A(1)));
 }
 static eccles_wasm_status_t hw_uart_write(eccles_wasm_vm_t *vm, uint64_t *s) {
-    uint8_t *p = eccles_wasm_vm_mem(vm, A(1), A(2)); if (!p) RET(W_BAD);
+    const char *op_ = "uart_write"; uint8_t *p;
+    G_PERM(ECCLES_WASM_PERM_UART); G_BUS(0, A(0));
+    p = eccles_wasm_vm_mem(vm, A(1), A(2)); if (!p) RET(W_BAD);
     RET(eccles_wasm_uart_write(A(0), p, A(2)));
 }
 static eccles_wasm_status_t hw_uart_read(eccles_wasm_vm_t *vm, uint64_t *s) {
-    uint8_t *p = eccles_wasm_vm_mem(vm, A(1), A(2)), *g = eccles_wasm_vm_mem(vm, A(4), 4); uint32_t got = 0; w_st st;
+    const char *op_ = "uart_read"; uint8_t *p, *g; uint32_t got = 0; w_st st;
+    G_PERM(ECCLES_WASM_PERM_UART); G_BUS(0, A(0));
+    p = eccles_wasm_vm_mem(vm, A(1), A(2)); g = eccles_wasm_vm_mem(vm, A(4), 4);
     if (!p || !g) RET(W_BAD);
     st = eccles_wasm_uart_read(A(0), p, A(2), A(3), &got);
     if (st == W_OK) w_put32(g, got);
     RET(st);
 }
 static eccles_wasm_status_t hw_i2c_write(eccles_wasm_vm_t *vm, uint64_t *s) {
-    uint8_t *p = eccles_wasm_vm_mem(vm, A(2), A(3)); if (!p) RET(W_BAD);
+    const char *op_ = "i2c_write"; uint8_t *p;
+    G_PERM(ECCLES_WASM_PERM_I2C); G_BUS(1, A(0)); G_ADDR(A(1));
+    p = eccles_wasm_vm_mem(vm, A(2), A(3)); if (!p) RET(W_BAD);
     RET(eccles_wasm_i2c_write(A(0), A(1), p, A(3)));
 }
 static eccles_wasm_status_t hw_i2c_read(eccles_wasm_vm_t *vm, uint64_t *s) {
-    uint8_t *p = eccles_wasm_vm_mem(vm, A(2), A(3)); if (!p) RET(W_BAD);
+    const char *op_ = "i2c_read"; uint8_t *p;
+    G_PERM(ECCLES_WASM_PERM_I2C); G_BUS(1, A(0)); G_ADDR(A(1));
+    p = eccles_wasm_vm_mem(vm, A(2), A(3)); if (!p) RET(W_BAD);
     RET(eccles_wasm_i2c_read(A(0), A(1), p, A(3)));
 }
 static eccles_wasm_status_t hw_i2c_write_read(eccles_wasm_vm_t *vm, uint64_t *s) {
-    uint8_t *t = eccles_wasm_vm_mem(vm, A(2), A(3)), *r = eccles_wasm_vm_mem(vm, A(4), A(5));
+    const char *op_ = "i2c_write_read"; uint8_t *t, *r;
+    G_PERM(ECCLES_WASM_PERM_I2C); G_BUS(1, A(0)); G_ADDR(A(1));
+    t = eccles_wasm_vm_mem(vm, A(2), A(3)); r = eccles_wasm_vm_mem(vm, A(4), A(5));
     if (!t || !r) RET(W_BAD);
     RET(eccles_wasm_i2c_write_read(A(0), A(1), t, A(3), r, A(5)));
 }
-static eccles_wasm_status_t hw_spi_transfer(eccles_wasm_vm_t *vm, uint64_t *s) {   /* tx/rx address 0 = "none" */
-    uint8_t *t = A(1) ? eccles_wasm_vm_mem(vm, A(1), A(3)) : NULL, *r = A(2) ? eccles_wasm_vm_mem(vm, A(2), A(3)) : NULL;
+static eccles_wasm_status_t hw_spi_transfer(eccles_wasm_vm_t *vm, uint64_t *s) {  //tx/rx address 0 = "none"
+    const char *op_ = "spi_transfer"; uint8_t *t, *r;
+    G_PERM(ECCLES_WASM_PERM_SPI); G_BUS(2, A(0));
+    t = A(1) ? eccles_wasm_vm_mem(vm, A(1), A(3)) : NULL; r = A(2) ? eccles_wasm_vm_mem(vm, A(2), A(3)) : NULL;
     if ((A(1) && !t) || (A(2) && !r)) RET(W_BAD);
     RET(eccles_wasm_spi_transfer(A(0), t, r, A(3)));
 }
@@ -3535,45 +3910,57 @@ static const w_builtin_t g_hw[] = {
     {"i2c_read", hw_i2c_read, "i(iiii)"}, {"i2c_write_read", hw_i2c_write_read, "i(iiiiii)"},
     {"spi_begin", hw_spi_begin, "i(iiiiii)"}, {"spi_transfer", hw_spi_transfer, "i(iiii)"}, {"spi_end", hw_spi_end, "i(i)"}
 };
-#endif /* builtin imports */
+#endif  //builtin imports
 
 #if ECCLES_WASM_WASI
-/* ---- minimal WASI: enough for printf()/exit() style C and Rust guests ---- */
+//minimal WASI: enough for printf()/exit() style C and Rust guests
 #define WASI_OK 0u
 #define WASI_EBADF 8u
 #define WASI_ENOSYS 52u
+#define WASI_ENOTCAPABLE 76u
+#define WASI_GUARD(bits, name) if ((vm->priv.perms & (bits)) != (bits)) { w_denied(vm, name); RET(WASI_ENOTCAPABLE); }
 static eccles_wasm_status_t wasi_fd_write(eccles_wasm_vm_t *vm, uint64_t *s) {
-    uint32_t fd = A(0), iov = A(1), n = A(2), i, total = 0; uint8_t *out = eccles_wasm_vm_mem(vm, A(3), 4);
-    if (!out) RET(28u);                                               /* EINVAL */
+    uint32_t fd = A(0), iov = A(1), n = A(2), i; uint64_t total = 0; uint8_t *out, *arr;
+    WASI_GUARD(ECCLES_WASM_PERM_LOG, "fd_write");
+    out = eccles_wasm_vm_mem(vm, A(3), 4);
+    if (!out) RET(28u);  //EINVAL
     if (fd != 1 && fd != 2) RET(WASI_EBADF);
+    //the WHOLE iovec array must lie inside guest memory before any entry is read (64-bit arithmetic: n * 8 cannot wrap)
+    if ((uint64_t)n * 8u > 0xFFFFFFFFu) RET(28u);
+    arr = n ? eccles_wasm_vm_mem(vm, iov, n * 8u) : NULL;
+    if (n && !arr) RET(28u);
     for (i = 0; i < n; i++) {
-        uint8_t *e = eccles_wasm_vm_mem(vm, iov + i * 8u, 8), *d; uint32_t len;
-        if (!e) RET(28u);
-        len = w_get32(e + 4); d = eccles_wasm_vm_mem(vm, w_get32(e), len);
-        if (!d && len) RET(28u);
+        uint32_t len = w_get32(arr + (size_t)i * 8u + 4u), ptr = w_get32(arr + (size_t)i * 8u); uint8_t *d;
+        if (total + len > 0xFFFFFFFFu) RET(28u);  //nwritten is a u32: refuse rather than wrap
+        d = len ? eccles_wasm_vm_mem(vm, ptr, len) : NULL;
+        if (len && !d) RET(28u);
         if (len) (void)eccles_wasm_log(d, len);
         total += len;
     }
-    w_put32(out, total); RET(WASI_OK);
+    w_put32(out, (uint32_t)total); RET(WASI_OK);
 }
 static eccles_wasm_status_t wasi_proc_exit(eccles_wasm_vm_t *vm, uint64_t *s) {
-    vm->exit_req = 1; vm->exit_code = (int32_t)A(0); (void)s; return ECCLES_WASM_FAILED;   /* unwinds the guest */
+    vm->exit_req = 1; vm->exit_code = (int32_t)A(0); (void)s; return ECCLES_WASM_FAILED;  //unwinds the guest
 }
-static eccles_wasm_status_t wasi_sizes_get(eccles_wasm_vm_t *vm, uint64_t *s) {            /* args_sizes_get / environ_sizes_get: none */
+static eccles_wasm_status_t wasi_sizes_get(eccles_wasm_vm_t *vm, uint64_t *s) {  //args_sizes_get / environ_sizes_get: none
     uint8_t *a = eccles_wasm_vm_mem(vm, A(0), 4), *b = eccles_wasm_vm_mem(vm, A(1), 4);
     if (!a || !b) RET(28u);
     w_put32(a, 0); w_put32(b, 0); RET(WASI_OK);
 }
-static eccles_wasm_status_t wasi_get(eccles_wasm_vm_t *vm, uint64_t *s) { (void)vm; RET(WASI_OK); }  /* args_get / environ_get: nothing to copy */
-static eccles_wasm_status_t wasi_clock_time_get(eccles_wasm_vm_t *vm, uint64_t *s) {       /* (id, precision i64, out) -> ns since boot */
-    uint32_t now; uint8_t *out = eccles_wasm_vm_mem(vm, A(2), 8);
+static eccles_wasm_status_t wasi_get(eccles_wasm_vm_t *vm, uint64_t *s) { (void)vm; RET(WASI_OK); }  //args_get / environ_get: nothing to copy
+static eccles_wasm_status_t wasi_clock_time_get(eccles_wasm_vm_t *vm, uint64_t *s) {  //(id, precision i64, out) -> ns since boot
+    uint32_t now; uint8_t *out;
+    WASI_GUARD(ECCLES_WASM_PERM_TIME, "clock_time_get");
+    out = eccles_wasm_vm_mem(vm, A(2), 8);
     if (!out) RET(28u);
     if (eccles_wasm_micros(&now) != W_OK) RET(WASI_ENOSYS);
-    vm->wasi_acc += (uint32_t)(now - vm->wasi_last); vm->wasi_last = now;   /* extend the 32-bit counter */
+    vm->wasi_acc += (uint32_t)(now - vm->wasi_last); vm->wasi_last = now;  //extend the 32-bit counter
     w_put64(out, vm->wasi_acc * 1000u); RET(WASI_OK);
 }
 static eccles_wasm_status_t wasi_random_get(eccles_wasm_vm_t *vm, uint64_t *s) {
-    uint8_t *p = eccles_wasm_vm_mem(vm, A(0), A(1)); uint32_t i = 0, v;
+    uint8_t *p; uint32_t i = 0, v;
+    WASI_GUARD(ECCLES_WASM_PERM_RANDOM, "random_get");
+    p = eccles_wasm_vm_mem(vm, A(0), A(1));
     if (!p && A(1)) RET(28u);
     while (i < A(1)) {
         uint32_t k;
@@ -3582,7 +3969,7 @@ static eccles_wasm_status_t wasi_random_get(eccles_wasm_vm_t *vm, uint64_t *s) {
     }
     RET(WASI_OK);
 }
-static eccles_wasm_status_t wasi_sched_yield(eccles_wasm_vm_t *vm, uint64_t *s) { (void)vm; (void)eccles_wasm_yield(); RET(WASI_OK); }
+static eccles_wasm_status_t wasi_sched_yield(eccles_wasm_vm_t *vm, uint64_t *s) { WASI_GUARD(ECCLES_WASM_PERM_TIME, "sched_yield"); (void)eccles_wasm_yield(); RET(WASI_OK); }
 static const w_builtin_t g_wasi[] = {
     {"fd_write", wasi_fd_write, "i(iiii)"}, {"proc_exit", wasi_proc_exit, "v(i)"},
     {"args_sizes_get", wasi_sizes_get, "i(ii)"}, {"environ_sizes_get", wasi_sizes_get, "i(ii)"},
@@ -3592,6 +3979,15 @@ static const w_builtin_t g_wasi[] = {
 };
 #endif
 
+#if ECCLES_WASM_THREADS
+static eccles_wasm_status_t thr_spawn(eccles_wasm_vm_t *vm, uint64_t *s) {  //wasi-threads: thread-spawn(start_arg) -> tid | <0
+    int32_t tid = -1;
+    if ((vm->priv.perms & ECCLES_WASM_PERM_THREADS) != ECCLES_WASM_PERM_THREADS) { w_denied(vm, "thread-spawn"); s[0] = (uint32_t)-1; return ECCLES_WASM_SUCCESSFUL; }
+    if (vm->spawn_cb) tid = vm->spawn_cb(vm, (uint32_t)s[0], vm->spawn_ctx);
+    s[0] = (uint32_t)tid;
+    return ECCLES_WASM_SUCCESSFUL;
+}
+#endif
 static int w_find_host(eccles_wasm_vm_t *vm, const char *name, eccles_wasm_host_fn *fn, const char **sig) {
     size_t i;
     if (strncmp(name, "eccles_wasm_", 12) == 0) name += 12;
@@ -3600,6 +3996,9 @@ static int w_find_host(eccles_wasm_vm_t *vm, const char *name, eccles_wasm_host_
 #if !defined(ECCLES_WASM_NO_BUILTIN_IMPORTS)
     for (i = 0; i < sizeof g_hw / sizeof g_hw[0]; i++)
         if (strcmp(g_hw[i].name, name) == 0) { *fn = g_hw[i].fn; *sig = g_hw[i].sig; return 1; }
+#endif
+#if ECCLES_WASM_THREADS
+    if (strcmp(name, "thread-spawn") == 0) { *fn = thr_spawn; *sig = "i(i)"; return 1; }
 #endif
 #if ECCLES_WASM_WASI
     for (i = 0; i < sizeof g_wasi / sizeof g_wasi[0]; i++)

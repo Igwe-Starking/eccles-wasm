@@ -28,6 +28,7 @@ static void call_line(char *line) {
 
 int main(int argc, char **argv) {
     if (argc < 3) { fprintf(stderr, "usage: wsrun file.wasm export [hexarg...] | --stdin\n"); return 2; }
+    eccles_wasm_set_hal_privilege(ECCLES_WASM_ALLOW_ALL);      /* dev CLI: trust the module (library default is deny-all) */
     if (eccles_wasm_load(argv[1]) != ECCLES_WASM_SUCCESSFUL) {
         printf("LOADFAIL %s info=%u %s\n", eccles_wasm_error_name(eccles_wasm_last_error()),
                (unsigned)eccles_wasm_last_error_info(), eccles_wasm_last_error_str());

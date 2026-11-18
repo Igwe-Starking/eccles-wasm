@@ -6,6 +6,7 @@
 #include "blink_wasm.h"
 
 int main(void) {
+    eccles_wasm_set_hal_privilege(ECCLES_WASM_ALLOW_PIN_ALL | ECCLES_WASM_ALLOW_SAFE);     /* v2: grant what the module may use */
     if (eccles_wasm_load_buffer(blink_wasm, sizeof blink_wasm) != ECCLES_WASM_SUCCESSFUL) return 1;
     eccles_wasm_run("setup");
     for (;;) eccles_wasm_run("loop");

@@ -1,6 +1,6 @@
 [package]
 name = "eccles-wasm-runtime"
-version = "1.1.0"
+version = "2.0.0"
 edition = "2021"
 description = "Guest-side API for ECCLES WASM: GPIO, PWM, ADC, I2C, SPI, UART, timing and logging from no_std Rust compiled to wasm32."
 license = "MIT"

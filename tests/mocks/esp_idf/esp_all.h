@@ -5,6 +5,7 @@ typedef int esp_err_t;
 #define ESP_OK 0
 #define ESP_ERR_INVALID_STATE 0x103
 #define IRAM_ATTR
+#define DRAM_ATTR
 /* freertos */
 typedef uint32_t TickType_t;
 #define pdMS_TO_TICKS(ms) ((TickType_t)(ms))

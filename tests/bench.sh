@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # usage: tests/bench.sh <wsrun-binary> ; prints best-of-3 wall ms for each benchmark
 BIN=${1:-build/wsrun}
 run() { name=$1; arg=$2; best=999999

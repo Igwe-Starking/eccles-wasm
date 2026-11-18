@@ -11,6 +11,7 @@ static eccles_wasm_status_t show_write(uint32_t pin, uint32_t level) {
 int main(int argc, char **argv) {
     const char *path = argc > 1 ? argv[1] : "examples/blink.wasm";
     uint64_t args[2], res[1]; uint32_t t0, t1;
+    eccles_wasm_set_hal_privilege(ECCLES_WASM_ALLOW_PIN_ALL | ECCLES_WASM_PERM_TIME | ECCLES_WASM_PERM_LOG);   /* the module may drive pins, sleep and print - nothing else */
     eccles_wasm_hal_t spy = {0}; spy.gpio_write = show_write; eccles_wasm_hal_override(&spy);
 
     if (eccles_wasm_load(path) != ECCLES_WASM_SUCCESSFUL) {

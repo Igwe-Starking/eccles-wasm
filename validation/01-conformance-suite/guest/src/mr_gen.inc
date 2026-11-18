@@ -1,0 +1,13 @@
+    ew_println("-- Miller-Rabin primality, full 64-bit range (deterministic, 12 bases)");
+    chk_i32("is_prime(2)", is_prime64(vu64(2ull)), 1);
+    chk_i32("is_prime(561)", is_prime64(vu64(561ull)), 0);
+    chk_i32("is_prime(3215031751)", is_prime64(vu64(3215031751ull)), 0);
+    chk_i32("is_prime(1000000007)", is_prime64(vu64(1000000007ull)), 1);
+    chk_i32("is_prime(4294967291)", is_prime64(vu64(4294967291ull)), 1);
+    chk_i32("is_prime(4294967297)", is_prime64(vu64(4294967297ull)), 0);
+    chk_i32("is_prime(2305843009213693951)", is_prime64(vu64(2305843009213693951ull)), 1);
+    chk_i32("is_prime(3825123056546413051)", is_prime64(vu64(3825123056546413051ull)), 0);
+    chk_i32("is_prime(9223372036854775783)", is_prime64(vu64(9223372036854775783ull)), 1);
+    chk_i32("is_prime(18446744073709551557)", is_prime64(vu64(18446744073709551557ull)), 1);
+    chk_i32("is_prime(18446744073709551615)", is_prime64(vu64(18446744073709551615ull)), 0);
+    chk_i32("is_prime(18446744073709551533)", is_prime64(vu64(18446744073709551533ull)), 1);

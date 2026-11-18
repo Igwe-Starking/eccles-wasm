@@ -1,7 +1,7 @@
 {
   "name": "eccles-wasm",
-  "version": "1.1.0",
-  "description": "WebAssembly executor for microcontrollers. Plain C99, one .h/.c/config, streams modules from files in small chunks, portable hardware API (enable/disable/sleep/analog/...).",
+  "version": "2.0.0",
+  "description": "WebAssembly executor for microcontrollers. Plain C99, one .h/.c/config, deny-by-default hardware sandbox, optional threads, streams modules from files in small chunks, portable hardware API (enable/disable/sleep/analog/...).",
   "keywords": "webassembly, wasm, interpreter, runtime, embedded, sandbox, ota, plugins, esp32, stm32, rp2040, nrf52, zephyr, arduino",
   "repository": {
     "type": "git",
@@ -24,6 +24,8 @@
       "config",
       "sdk",
       "docs",
+      "wiki",
+      "tools",
       "examples",
       "assets",
       "library.json",

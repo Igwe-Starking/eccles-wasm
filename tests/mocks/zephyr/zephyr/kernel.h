@@ -15,3 +15,4 @@ extern const struct device dev_gpio0;
 int device_is_ready(const struct device *);
 uint32_t k_uptime_get_32(void); int64_t k_uptime_ticks(void); int64_t k_ticks_to_us_floor64(int64_t);
 int32_t k_msleep(int32_t); void k_busy_wait(uint32_t); void k_yield(void);
+#define __ramfunc

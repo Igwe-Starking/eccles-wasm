@@ -1,0 +1,25 @@
+    ew_println("-- iterative algorithms (bit-exact vs Python replica: any 1-ulp discrepancy would show)");
+    chk_f64("Machin pi = 16 atan(1/5) - 4 atan(1/239)", a64_machin(), 0x400921FB54442D1Aull);
+    chk_near("  machin vs true pi", a64_machin(), 3.141592653589793, 2e-15);
+    chk_f64("e = sum 1/k!", a64_e(), 0x4005BF0A8B14576Aull);
+    chk_f64("sqrt(2) by Newton", a64_newton(vf64(2.0)), 0x3FF6A09E667F3BCCull);
+    chk_f64("cbrt(2) by Newton", a64_cbrt2(), 0x3FF428A2F98D728Bull);
+    chk_near("  cbrt(2) vs 1.2599210498948732", a64_cbrt2(), 1.2599210498948732, 3e-16);
+    chk_f64("logistic map x=3.99x(1-x), 200 iterations (chaotic)", a64_logistic(), 0x3FD2A1C3802E80B5ull);
+    chk_f32("logistic map f32, 100 iterations (chaotic)", a32_logistic(), 0x3F02C6E1u);
+    chk_f64("golden ratio, 60 continued-fraction steps", a64_golden(), 0x3FF9E3779B97F4A8ull);
+    chk_f64("naive sum of 0.1 x1000", a64_naive01(), 0x4058FFFFFFFFFF9Dull);
+    chk_f64("Kahan sum of 0.1 x1000", a64_kahan01(), 0x4059000000000000ull);
+    chk_f64("Horner (x-1)^7 expanded at x=1.01 (cancellation noise)", a64_horner7(), 0x3D02000000000000ull);
+    chk_f32("f32 harmonic sum H(3000)", a32_harm(), 0x41095711u);
+    chk_f32("f32 naive: 1 + 1e-8 x100000 (every add is lost)", a32_naive(), 0x3F800000u);
+    chk_f32("f32 Kahan: 1 + 1e-8 x100000", a32_kahan(), 0x3F8020C5u);
+    chk_near("  f32 Kahan vs exact 1.001", (double)a32_kahan(), 1.001, 2e-7);
+    { double x[4]; int i; a64_gauss4(x);
+      chk_f64("gauss4 x[0] (exact answer 1)", x[0], 0x3FF0000000000000ull);
+      chk_f64("gauss4 x[1] (exact answer -2)", x[1], 0xBFFFFFFFFFFFFFFBull);
+      chk_f64("gauss4 x[2] (exact answer 3)", x[2], 0x4008000000000000ull);
+      chk_f64("gauss4 x[3] (exact answer -4)", x[3], 0xC00FFFFFFFFFFFFEull);
+      for (i = 0; i < 4; i++) { static const double ex[4] = {1.0, -2.0, 3.0, -4.0}; chk_near("  gauss4 vs exact", x[i], ex[i], 1e-12); } }
+    chk_f64("det(Hilbert 5x5) by elimination", a64_hilbert5(), 0x3D907D54BF10BE7Bull);
+    chk_near("  det(H5) vs 1/266716800000", a64_hilbert5(), 1.0 / 266716800000.0, 1e-18);
