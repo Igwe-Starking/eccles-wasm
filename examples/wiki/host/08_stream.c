@@ -33,7 +33,6 @@ int main(int argc, char **argv) {
     /* a truncated download is detected, not executed */
     s.pos = 0; s.len = s.len / 2;
     if (eccles_wasm_load_stream(read_cb, &s) != ECCLES_WASM_SUCCESSFUL)
-        printf("half a module -> %s\n",
-               eccles_wasm_error_name(eccles_wasm_last_error()));
+        printf("half a module -> %s\n", eccles_wasm_error_name(eccles_wasm_last_error()));
     return 0;
 }

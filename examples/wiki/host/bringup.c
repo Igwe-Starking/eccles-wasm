@@ -33,7 +33,7 @@ int eccles_bringup(void) {
     }
     BRINGUP_PRINT("stage 2 compute: OK    add(20, 22) = 42\n");
 
-    /* 3. memory report (checks: how much of the arena a real module uses) */
+    /* 3. memory report (checks: the arena and the guest memory exist; eccles_wasm_get_stats() also has arena_used) */
     s = eccles_wasm_get_stats();
     BRINGUP_PRINT("stage 3 memory:  OK    arena %u bytes, guest memory %u bytes\n",
                   (unsigned)s.arena_size, (unsigned)s.memory_bytes);

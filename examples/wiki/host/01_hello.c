@@ -29,6 +29,6 @@ int main(int argc, char **argv) {
         printf("no export called \"nope\" - that is fine\n");
 
     eccles_wasm_stats_t s = eccles_wasm_get_stats();                /* 5. how much memory did that take? */
-    printf("arena: %u bytes, module loaded: %s\n", (unsigned)s.arena_size,s.loaded ? "yes" : "no");
+    printf("arena: %u bytes, module loaded: %s\n", (unsigned)s.arena_size, s.loaded ? "yes" : "no");
     return 0;
 }

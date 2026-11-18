@@ -175,7 +175,7 @@ int main(int argc, char **argv) {
         printf("no export called \"nope\" - that is fine\n");
 
     eccles_wasm_stats_t s = eccles_wasm_get_stats();                /* 5. how much memory did that take? */
-    printf("arena: %u of %u bytes used, %u functions\n", (unsigned)s.arena_used, (unsigned)s.arena_size, (unsigned)s.functions);
+    printf("arena: %u bytes, module loaded: %s\n", (unsigned)s.arena_size, s.loaded ? "yes" : "no");
     return 0;
 }
 ```
@@ -195,7 +195,7 @@ add(20, 22) = 42
 fib(10)     = 55
 hello from wasm, running for 0 ms
 no export called "nope" - that is fine
-arena: 74702 of 1046784 bytes used, 7 functions
+arena: 1046784 bytes, module loaded: yes
 ```
 
 (On the desktop simulator the clock is virtual, so `running for 0 ms` is expected. On a chip it shows real time.)
@@ -591,10 +591,10 @@ int eccles_bringup(void) {
     }
     BRINGUP_PRINT("stage 2 compute: OK    add(20, 22) = 42\n");
 
-    /* 3. memory report (checks: how much of the arena a real module uses) */
+    /* 3. memory report (checks: the arena and the guest memory exist; eccles_wasm_get_stats() also has arena_used) */
     s = eccles_wasm_get_stats();
-    BRINGUP_PRINT("stage 3 memory:  OK    arena %u bytes, used %u, guest memory %u bytes\n",
-                  (unsigned)s.arena_size, (unsigned)s.arena_used, (unsigned)s.memory_bytes);
+    BRINGUP_PRINT("stage 3 memory:  OK    arena %u bytes, guest memory %u bytes\n",
+                  (unsigned)s.arena_size, (unsigned)s.memory_bytes);
 
     /* 4. privileges (checks: deny-by-default works) */
     eccles_wasm_set_hal_privilege(ECCLES_WASM_ALLOW_NONE);
@@ -628,7 +628,7 @@ Expected output (on a chip the time and sizes differ):
 eccles-wasm 2.0.0
 stage 1 load:    OK
 stage 2 compute: OK    add(20, 22) = 42
-stage 3 memory:  OK    arena 1046784 bytes, used 74702, guest memory 65536 bytes
+stage 3 memory:  OK    arena 1046784 bytes, guest memory 65536 bytes
 stage 4 denied:  OK    refused calls: 2 (last: log)
 stage 5 console: the next line comes from inside the module:
 hello from wasm, running for 0 ms
@@ -1834,14 +1834,13 @@ int main(int argc, char **argv) {
     if (eccles_wasm_load_stream(read_cb, &s) == ECCLES_WASM_SUCCESSFUL) {
         uint64_t a[2] = { 1, 2 }, r[1];
         eccles_wasm_call("add", a, 2, r, 1);
-        printf("streamed %u bytes in 37-byte pieces; add(1, 2) = %d\n", (unsigned)s.len, (int)eccles_wasm_to_i32(r[0]));
+        printf("streamed the module in 37-byte pieces; add(1, 2) = %d\n", (int)eccles_wasm_to_i32(r[0]));
     }
 
     /* a truncated download is detected, not executed */
     s.pos = 0; s.len = s.len / 2;
     if (eccles_wasm_load_stream(read_cb, &s) != ECCLES_WASM_SUCCESSFUL)
-        printf("half a module -> %s (info = byte offset %u)\n",
-               eccles_wasm_error_name(eccles_wasm_last_error()), (unsigned)eccles_wasm_last_error_info());
+        printf("half a module -> %s\n", eccles_wasm_error_name(eccles_wasm_last_error()));
     return 0;
 }
 ```
@@ -1850,8 +1849,8 @@ int main(int argc, char **argv) {
 Output:
 
 ```text
-streamed 3800 bytes in 37-byte pieces; add(1, 2) = 3
-half a module -> malformed module (info = byte offset 1900)
+streamed the module in 37-byte pieces; add(1, 2) = 3
+half a module -> malformed module
 ```
 
 The read callback contract:

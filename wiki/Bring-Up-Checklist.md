@@ -75,10 +75,10 @@ int eccles_bringup(void) {
     }
     BRINGUP_PRINT("stage 2 compute: OK    add(20, 22) = 42\n");
 
-    /* 3. memory report (checks: how much of the arena a real module uses) */
+    /* 3. memory report (checks: the arena and the guest memory exist; eccles_wasm_get_stats() also has arena_used) */
     s = eccles_wasm_get_stats();
-    BRINGUP_PRINT("stage 3 memory:  OK    arena %u bytes, used %u, guest memory %u bytes\n",
-                  (unsigned)s.arena_size, (unsigned)s.arena_used, (unsigned)s.memory_bytes);
+    BRINGUP_PRINT("stage 3 memory:  OK    arena %u bytes, guest memory %u bytes\n",
+                  (unsigned)s.arena_size, (unsigned)s.memory_bytes);
 
     /* 4. privileges (checks: deny-by-default works) */
     eccles_wasm_set_hal_privilege(ECCLES_WASM_ALLOW_NONE);
@@ -112,7 +112,7 @@ Expected output (on a chip the time and sizes differ):
 eccles-wasm 2.0.0
 stage 1 load:    OK
 stage 2 compute: OK    add(20, 22) = 42
-stage 3 memory:  OK    arena 1046784 bytes, used 74702, guest memory 65536 bytes
+stage 3 memory:  OK    arena 1046784 bytes, guest memory 65536 bytes
 stage 4 denied:  OK    refused calls: 2 (last: log)
 stage 5 console: the next line comes from inside the module:
 hello from wasm, running for 0 ms
