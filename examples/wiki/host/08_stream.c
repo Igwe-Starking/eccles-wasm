@@ -27,13 +27,13 @@ int main(int argc, char **argv) {
     if (eccles_wasm_load_stream(read_cb, &s) == ECCLES_WASM_SUCCESSFUL) {
         uint64_t a[2] = { 1, 2 }, r[1];
         eccles_wasm_call("add", a, 2, r, 1);
-        printf("streamed %u bytes in 37-byte pieces; add(1, 2) = %d\n", (unsigned)s.len, (int)eccles_wasm_to_i32(r[0]));
+        printf("streamed the module in 37-byte pieces; add(1, 2) = %d\n", (int)eccles_wasm_to_i32(r[0]));
     }
 
     /* a truncated download is detected, not executed */
     s.pos = 0; s.len = s.len / 2;
     if (eccles_wasm_load_stream(read_cb, &s) != ECCLES_WASM_SUCCESSFUL)
-        printf("half a module -> %s (info = byte offset %u)\n",
-               eccles_wasm_error_name(eccles_wasm_last_error()), (unsigned)eccles_wasm_last_error_info());
+        printf("half a module -> %s\n",
+               eccles_wasm_error_name(eccles_wasm_last_error()));
     return 0;
 }

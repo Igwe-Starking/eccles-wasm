@@ -35,8 +35,8 @@ int eccles_bringup(void) {
 
     /* 3. memory report (checks: how much of the arena a real module uses) */
     s = eccles_wasm_get_stats();
-    BRINGUP_PRINT("stage 3 memory:  OK    arena %u bytes, used %u, guest memory %u bytes\n",
-                  (unsigned)s.arena_size, (unsigned)s.arena_used, (unsigned)s.memory_bytes);
+    BRINGUP_PRINT("stage 3 memory:  OK    arena %u bytes, guest memory %u bytes\n",
+                  (unsigned)s.arena_size, (unsigned)s.memory_bytes);
 
     /* 4. privileges (checks: deny-by-default works) */
     eccles_wasm_set_hal_privilege(ECCLES_WASM_ALLOW_NONE);
